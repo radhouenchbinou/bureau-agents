@@ -1,0 +1,12 @@
+{
+  "name": "bureau-agents",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bureau 3D des sessions Claude Code et de leurs agents, avec la santé du Mac",
+  "scripts": {
+    "start": "node server.js",
+    "installer": "zsh installer.sh",
+    "retirer": "zsh installer.sh --retirer"
+  },
+  "engines": { "node": ">=18" }
+}
