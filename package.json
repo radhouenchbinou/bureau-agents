@@ -1,12 +1,13 @@
 {
   "name": "bureau-agents",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Bureau 3D des sessions Claude Code et de leurs agents, avec la santé du Mac",
+  "description": "Plan 2D des agents de codage (Claude Code) d'un poste, avec bureaux, projets, rôles, rendement et santé du poste. macOS, Linux et Windows.",
   "scripts": {
     "start": "node server.js",
-    "installer": "zsh installer.sh",
-    "retirer": "zsh installer.sh --retirer"
+    "test": "node --test",
+    "installer": "node outils/installer.js",
+    "retirer": "node outils/installer.js --retirer"
   },
-  "engines": { "node": ">=18" }
+  "engines": { "node": ">=18.15" }
 }

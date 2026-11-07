@@ -1,242 +1,353 @@
-// Bureau 3D des sessions Claude Code et de leurs agents, fiche de détail et annuaire ; rafraîchi toutes les 10 s
+// Bureau des agents (2D) : plan des bureaux avec glisser-déposer, fiche, rendement, santé du poste et organisation.
+// Les données viennent de /api/etat toutes les 10 s ; chaque modification passe par POST /api/organisation.
 'use strict';
-const ETATS = {
-  en_cours: { t: 'en cours', css: 'var(--run)', hex: 0x1D9E75 }, en_attente: { t: 'en attente', css: 'var(--warn)', hex: 0xE3A944 },
-  termine: { t: 'terminé', css: 'var(--done)', hex: 0x9A978D }, interrompu: { t: 'interrompu', css: 'var(--risk)', hex: 0xD85A5A },
-  active: { t: 'active', css: 'var(--run)', hex: 0x1D9E75 }, inactive: { t: 'inactive', css: 'var(--warn)', hex: 0xE3A944 },
-  terminee: { t: 'terminée', css: 'var(--done)', hex: 0x9A978D }
-};
-const PALETTE = [0x7F77DD, 0x1D9E75, 0xD85A30, 0x3B82C4, 0xC98A1E, 0xB45AA8, 0x5A9E3A, 0x2E9AA8];
-const hex = c => '#' + c.toString(16).padStart(6, '0');
-const hash = s => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) | 0; return Math.abs(h); };
-const colOf = s => s.etat === 'terminee' ? 0x9A978D : PALETTE[hash(s.projet) % PALETTE.length];
-const clip = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
-const QS = new URLSearchParams(location.search).get('t'), API = '/api/etat' + (QS ? '?t=' + encodeURIComponent(QS) : '');
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
 
-let DATA = null, showDone = store.get('bureau.showDone') === '1', sel = null;
-const $ = id => document.getElementById(id);
-$('show-done').checked = showDone;
-const visible = () => DATA ? DATA.sessions.filter(s => showDone || s.etat !== 'terminee') : [];
-const findS = id => DATA && DATA.sessions.find(s => s.id === id);
+const ETATS = {
+  en_cours: { t: 'en cours', css: 'var(--run)', vif: true }, en_attente: { t: 'en attente', css: 'var(--warn)', vif: true },
+  termine: { t: 'terminé', css: 'var(--done)' }, interrompu: { t: 'interrompu', css: 'var(--risk)' },
+  active: { t: 'au travail', css: 'var(--run)', vif: true }, inactive: { t: 'en pause', css: 'var(--warn)', vif: true }, terminee: { t: 'fermée', css: 'var(--done)' }
+};
+const FEN_MS = { '1h': 36e5, '24h': 864e5, '7j': 7 * 864e5 };
+const PALETTE = ['#6a61d0', '#13866a', '#c4512a', '#2f6fb3', '#b0801c', '#a24c97', '#4f8a2f', '#1f8a99', '#8a5a3a', '#c0446a'];
+const hash = s => { let h = 7; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) | 0; return Math.abs(h); };
+const couleur = id => id ? PALETTE[hash(id) % PALETTE.length] : '#8a877d';
 
-// ---------- Scène ----------
-const wrap = $('wrap'), tip = $('tip'), coarse = matchMedia('(pointer: coarse)').matches;
-const renderer = new THREE.WebGLRenderer({ antialias: !coarse, alpha: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, coarse ? 1.5 : 2)); renderer.shadowMap.enabled = true; wrap.prepend(renderer.domElement);
-const scene = new THREE.Scene(), cam = new THREE.PerspectiveCamera(40, 1, 0.1, 400);
-let fit = 1, camReady = false;
-function resize() { const w = wrap.clientWidth, h = wrap.clientHeight; renderer.setSize(w, h); cam.aspect = w / h; cam.updateProjectionMatrix(); fit = Math.max(1, 1.6 / cam.aspect); if (camReady) placeCam(); }
-new ResizeObserver(resize).observe(wrap); resize();
-scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a80, 0.75));
-const sun = new THREE.DirectionalLight(0xffffff, 0.7); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048); scene.add(sun); scene.add(sun.target);
-const M = (c, o = {}) => new THREE.MeshLambertMaterial(Object.assign({ color: c }, o));
-const box = (w, h, d, c) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), M(c)); m.castShadow = m.receiveShadow = true; return m; };
-function label(text, color, scale = 1) {
-  const c = document.createElement('canvas'), x = c.getContext('2d'), fs = 44, font = '500 ' + fs + 'px ui-sans-serif,system-ui,sans-serif';
-  x.font = font; const w = Math.ceil(x.measureText(text).width) + 36; c.width = w; c.height = fs + 28;
-  x.font = font; x.fillStyle = color; x.beginPath(); x.roundRect ? x.roundRect(0, 0, w, c.height, 14) : x.rect(0, 0, w, c.height); x.fill();
-  x.fillStyle = '#fff'; x.textBaseline = 'middle'; x.fillText(text, 18, c.height / 2 + 2);
-  const t = new THREE.CanvasTexture(c); t.minFilter = THREE.LinearFilter;
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, depthTest: false })); s.scale.set(w / c.height * 0.42 * scale, 0.42 * scale, 1); s.renderOrder = 10; s.userData.base = s.scale.clone(); return s;
+// ---------- Formats ----------
+const fr = (n, d = 1) => n == null ? '—' : Number(n).toLocaleString('fr-FR', { minimumFractionDigits: d, maximumFractionDigits: d });
+const nb = n => n == null ? '—' : n >= 1e9 ? fr(n / 1e9) + ' Md' : n >= 1e6 ? fr(n / 1e6) + ' M' : n >= 1e4 ? fr(n / 1e3, 0) + ' k' : Number(n).toLocaleString('fr-FR');
+const dollars = n => n == null ? '—' : (n >= 100 ? fr(n, 0) : fr(n, 2)) + ' $';
+const pct = n => n == null ? '—' : fr(100 * n) + ' %';
+function duree(ms) { if (!ms) return '—'; const s = Math.round(ms / 1000); if (s < 60) return s + ' s'; const m = Math.round(s / 60); if (m < 60) return m + ' min'; const h = Math.floor(m / 60); return h + ' h ' + String(m % 60).padStart(2, '0'); }
+function ago(ms) { if (!ms) return '—'; const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 90 ? 'il y a ' + s + ' s' : s < 5400 ? 'il y a ' + Math.round(s / 60) + ' min' : s < 172800 ? 'il y a ' + Math.round(s / 3600) + ' h' : 'il y a ' + Math.round(s / 86400) + ' j'; }
+const initiales = n => (String(n).match(/[\p{L}\p{N}]+/gu) || ['?']).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+
+// ---------- État ----------
+const TQ = new URLSearchParams(location.search).get('t');
+let D = null, S = new Map(), A = new Map(), P = new Map(), B = new Map();
+let vue = store.get('bureau.vue') || 'plan', fen = store.get('bureau.fen') || '24h', fermees = store.get('bureau.fermees') === '1', cherche = '', sel = store.get('bureau.sel');
+let tri = { agents: { c: 'cout', asc: false }, sessions: { c: 'cout', asc: false } };
+$('fermees').checked = fermees;
+
+const nomDe = cle => (S.get(cle) || A.get(cle) || {}).nom || 'absent';
+function rolesDe(cle) {
+  const o = D.organisation, r = [];
+  if (o.roles.chefProjet === cle) r.push(['Chef de projet', 'cp']);
+  if (o.roles.techLead === cle) r.push(['Tech lead', 'tl']);
+  for (const p of o.projets) if (p.techLead === cle) r.push(['TL · ' + p.nom, 'tl']);
+  return r;
 }
-const skins = [0xe6b89c, 0xc68b6a, 0x8d5a3b, 0xf1cbb0, 0xa86f4c], hairs = [0x2c2c2a, 0x5a3a22, 0x1a1a1a, 0x8a6a3a];
-function person(col, seated, seed) {
-  const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.32, 0.75, 12), M(col)); body.position.y = seated ? 0.95 : 1.0; body.castShadow = true; g.add(body);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 16, 12), M(skins[seed % 5])); head.position.y = seated ? 1.55 : 1.6; head.castShadow = true; g.add(head);
-  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.23, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2), M(hairs[(seed >> 3) % 4])); hair.position.y = head.position.y + 0.02; g.add(hair);
-  if (!seated) for (const s of [-0.12, 0.12]) { const l = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.62, 8), M(0x3b3b44)); l.position.set(s, 0.31, 0); l.castShadow = true; g.add(l); }
-  g.userData = { body, head }; return g;
+const enFenetre = x => ETATS[x.etat].vif || x.derniereActivite >= Date.now() - FEN_MS[fen];
+const correspond = x => !cherche || x.nom.toLowerCase().includes(cherche) || (x.nomOrigine || '').toLowerCase().includes(cherche);
+function sessionsVisibles() { return D.sessions.filter(s => (fermees || s.etat !== 'terminee') && enFenetre(s)); }
+function agentsVisibles(s) { return s.agents.map(k => A.get(k)).filter(a => a && enFenetre(a)); }
+// Pendant qu'on tape dans un champ, on ne redessine pas le bloc qui le contient
+const occupe = el => { const a = document.activeElement; return a && el.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName); };
+
+// ---------- Plan ----------
+function carte(x, lead) {
+  const e = ETATS[x.etat], p = P.get(x.projet), roles = lead ? rolesDe(x.cle) : [];
+  return '<button type="button" class="pers' + (lead ? ' lead' : '') + (e.vif ? '' : ' fini') + (sel === x.cle ? ' on' : '') + '" draggable="true" data-k="' + esc(x.cle) + '" style="--c:' + couleur(x.projet) + ';--e:' + e.css + '" title="' + esc(x.nom) + '">'
+    + '<span class="av">' + esc(initiales(x.nom)) + '<i' + (x.etat === 'en_cours' || x.etat === 'active' ? ' class="pulse"' : '') + '></i></span>'
+    + '<span class="nm">' + esc(x.nom) + '</span>'
+    + (lead ? '<span class="roles">' + roles.map(r => '<span class="role ' + r[1] + '">' + esc(r[0]) + '</span>').join('') + '</span>' : '')
+    + '<span class="sub">' + e.t + (lead ? ' · ' + esc(p ? p.nom : x.depot) : x.etat === 'en_cours' || x.etat === 'en_attente' ? '' : ' · ' + ago(x.derniereActivite)) + '</span></button>';
 }
-
-let office = null, clickables = [], devs = [], screens = [], labels = {}, anchors = {}, leads = [], packets = [], bounds = { cx: 0, cz: 0, r: 20 };
-function dispose(o) { o.traverse(n => { if (n.geometry) n.geometry.dispose(); if (n.material) { if (n.material.map) n.material.map.dispose(); n.material.dispose(); } }); }
-
-function build(list) {
-  if (office) { scene.remove(office); dispose(office); }
-  packets.forEach(p => { scene.remove(p.m); p.m.material.dispose(); }); packets = [];
-  office = new THREE.Group(); scene.add(office); clickables = []; devs = []; screens = []; labels = {}; anchors = {}; leads = [];
-  const tag = (objs, k) => objs.forEach(o => { o.userData.k = k; clickables.push(o); });
-  // Dimensions de chaque îlot : les agents en rangées, le lead devant
-  const pods = list.map(s => { const n = s.agents.length, cols = n ? Math.min(6, Math.max(2, Math.ceil(Math.sqrt(n * 1.4)))) : 1, rows = Math.ceil(n / cols);
-    return { s, n, cols, rows, w: Math.max(cols * 1.9, 3.6) + 1.2, d: rows * 1.9 + 3.6 }; });
-  const area = pods.reduce((a, p) => a + p.w * p.d, 0), maxW = Math.max(16, Math.sqrt(area) * 1.5);
-  let x = 0, z = 0, rowD = 0, W = 0;
-  pods.forEach(p => { if (x > 0 && x + p.w > maxW) { z += rowD + 1.5; x = 0; rowD = 0; } p.x = x + p.w / 2; p.z = z; x += p.w + 1.5; rowD = Math.max(rowD, p.d); W = Math.max(W, x - 1.5); });
-  const D = z + rowD, ox = -W / 2, oz = -D / 2;
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(W + 8, D + 8), M(0xd9d4c7)); floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; office.add(floor);
-  const back = box(W + 8, 3.5, 0.3, 0xece8de); back.position.set(0, 1.75, -D / 2 - 4); office.add(back);
-  for (let i = 0; i < Math.max(2, Math.round(W / 6)); i++) { const w = new THREE.Mesh(new THREE.PlaneGeometry(3, 1.6), M(0xbfd8ee, { emissive: 0x6a8fb0, emissiveIntensity: 0.35 })); w.position.set(-W / 2 + (i + 0.5) * (W / Math.max(2, Math.round(W / 6))), 2.1, -D / 2 - 3.84); office.add(w); }
-  const half = Math.max(W, D) / 2 + 4; Object.assign(sun.shadow.camera, { left: -half, right: half, top: half, bottom: -half, far: 120 }); sun.shadow.camera.updateProjectionMatrix();
-  sun.position.set(8, 30, 14); sun.target.position.set(0, 0, 0);
-  pods.forEach(p => {
-    const s = p.s, col = colOf(s), cx = ox + p.x, z0 = oz + p.z, sk = 's:' + s.id, fini = s.etat === 'terminee';
-    const rug = new THREE.Mesh(new THREE.PlaneGeometry(p.w, p.d), M(new THREE.Color(col).lerp(new THREE.Color(0xd9d4c7), fini ? 0.85 : 0.72)));
-    rug.rotation.x = -Math.PI / 2; rug.position.set(cx, 0.01, z0 + p.d / 2); rug.receiveShadow = true; office.add(rug); tag([rug], sk);
-    s.agents.forEach((a, i) => {
-      const r = Math.floor(i / p.cols), c = i % p.cols, ax = cx + (c - (p.cols - 1) / 2) * 1.9, az = z0 + 1.2 + r * 1.9, k = 'a:' + s.id + ':' + a.id, e = ETATS[a.etat], g = new THREE.Group();
-      g.position.set(ax, 0, az); office.add(g);
-      const top = box(1.5, 0.08, 0.8, fini ? 0xa9a193 : 0xb98d5e); top.position.y = 0.78; g.add(top);
-      for (const px of [-0.68, 0.68]) for (const q of [-0.33, 0.33]) { const l = box(0.06, 0.76, 0.06, 0x55524c); l.position.set(px, 0.38, q); g.add(l); }
-      const mon = box(0.75, 0.48, 0.05, 0x222226); mon.position.set(0, 1.18, -0.22); g.add(mon);
-      const scr = new THREE.Mesh(new THREE.PlaneGeometry(0.68, 0.4), new THREE.MeshBasicMaterial({ color: e.hex })); scr.position.set(0, 1.18, -0.19); g.add(scr);
-      screens.push({ m: scr.material, base: new THREE.Color(e.hex), ph: hash(a.id) % 60 / 10, mode: a.etat });
-      const kb = box(0.5, 0.03, 0.16, 0x3a3a3e); kb.position.set(0, 0.84, 0.08); g.add(kb);
-      const ch = box(0.55, 0.08, 0.55, 0x3b3b44); ch.position.set(0, 0.5, 0.75); g.add(ch); const bk = box(0.55, 0.6, 0.08, 0x3b3b44); bk.position.set(0, 0.85, 1.03); g.add(bk);
-      const objs = [top, mon, scr, ch];
-      if (a.etat === 'en_cours' || a.etat === 'en_attente') { const pp = person(col, true, hash(a.id)); pp.position.set(0, 0, 0.72); g.add(pp); devs.push({ p: pp, ph: hash(a.id) % 60 / 10, on: a.etat === 'en_cours' }); objs.push(pp.userData.body, pp.userData.head); }
-      const lb = label(clip(a.description, 30), e.css.includes('run') ? '#13866A' : hex(e.hex), 0.8); lb.position.set(0, 2.15, 0.3); g.add(lb); labels[k] = { l: lb, always: a.etat === 'en_cours' };
-      anchors[k] = new THREE.Vector3(ax, 1.3, az); tag(objs, k);
-    });
-    // Lead : debout devant son équipe, derrière un bureau
-    const lz = z0 + p.d - 1.0, ld = box(2.2, 0.1, 0.9, fini ? 0x8f8676 : 0x8a5f3a); ld.position.set(cx, 0.8, lz - 0.5); office.add(ld);
-    const lf = box(2.1, 0.75, 0.08, fini ? 0x7a7264 : 0x6e4a2c); lf.position.set(cx, 0.4, lz - 0.08); office.add(lf);
-    const objs = [ld, lf];
-    if (!fini) { const lp = person(col, false, hash(s.id)); lp.position.set(cx, 0, lz); lp.rotation.y = Math.PI; office.add(lp); leads.push({ p: lp, ph: hash(s.id) % 60 / 10, on: s.etat === 'active' }); objs.push(lp.userData.body, lp.userData.head); }
-    tag(objs, sk); anchors[sk] = new THREE.Vector3(cx, 1.6, lz);
-    const lb = label(clip(s.nom, 34), hex(col), 1.15); lb.position.set(cx, 2.7, lz); office.add(lb); labels[sk] = { l: lb, always: true };
-    if (!p.n) { const nb = label('aucun agent', '#8a877d', 0.7); nb.position.set(cx, 1.2, z0 + 1.3); office.add(nb); }
-  });
-  bounds = { cx: 0, cz: 0, r: Math.max(12, Math.max(W, D) * 0.85 + 6) };
+function renderPlan() {
+  const parBureau = new Map(D.organisation.bureaux.map(b => [b.id, new Map()]));
+  const equipe = (b, s) => { const m = parBureau.get(b) || parBureau.get('accueil'); if (!m.has(s.cle)) m.set(s.cle, { s, lead: false, agents: [] }); return m.get(s.cle); };
+  for (const s of sessionsVisibles()) {
+    const ag = agentsVisibles(s), okS = correspond(s), okA = ag.filter(correspond);
+    if (!okS && !okA.length) continue;
+    if (okS || okA.some(a => a.bureau === s.bureau)) equipe(s.bureau, s).lead = true;
+    for (const a of okS ? ag : okA) equipe(a.bureau, s).agents.push(a);
+  }
+  const pleins = [], vides = [];
+  for (const b of D.organisation.bureaux) (parBureau.get(b.id).size ? pleins : vides).push(b);
+  const piece = b => {
+    const eq = [...parBureau.get(b.id).values()], n = eq.reduce((x, e) => x + e.agents.length + (e.lead ? 1 : 0), 0);
+    return '<section class="piece" data-b="' + esc(b.id) + '" style="--c:' + couleur(b.id) + '"><div class="piece-h"><h3>' + esc(b.nom) + '</h3><small>' + n + ' pers.</small></div><div class="piece-b">'
+      + (eq.length ? eq.map(e => '<div class="equipe">' + (e.lead ? carte(e.s, true) : '<p class="none" style="font-size:11.5px">Équipe de ' + esc(e.s.nom) + '</p>')
+        + (e.agents.length ? '<div class="postes">' + e.agents.map(a => carte(a, false)).join('') + '</div>' : '') + '</div>').join('') : '<div class="piece-vide">Bureau vide : glisse quelqu\'un ici.</div>')
+      + '</div></section>';
+  };
+  $('plan').innerHTML = pleins.map(piece).join('') + vides.map(piece).join('')
+    + '<div class="ajout"><form id="f-bureau"><input type="text" name="nom" maxlength="60" placeholder="Nom du nouveau bureau" aria-label="Nom du nouveau bureau" required><button class="btn prim" type="submit">Créer</button></form></div>';
 }
-
-// Caméra orbitale
-let th = 0, ph = 0.95, rad = 27, radTo = 27, drag = false, px = 0, py = 0, moved = 0, ptype = 'mouse';
-const look = new THREE.Vector3(), lookTo = new THREE.Vector3();
-function placeCam() { const R = rad * fit; cam.position.set(look.x + R * Math.sin(ph) * Math.sin(th), look.y + R * Math.cos(ph), look.z + R * Math.sin(ph) * Math.cos(th)); cam.lookAt(look); }
-camReady = true; placeCam();
-const maxRad = () => bounds.r * 2;
-function viewAll() { lookTo.set(bounds.cx, 0.5, bounds.cz); radTo = bounds.r; }
-function viewAt(k, r) { const a = anchors[k]; if (a) { lookTo.set(a.x, 0.8, a.z - (k.startsWith('s:') ? 2 : 0)); radTo = r; } }
-$('zin').onclick = () => { radTo = Math.max(5, radTo * 0.8); };
-$('zout').onclick = () => { radTo = Math.min(maxRad(), radTo * 1.25); };
-$('zall').onclick = viewAll;
-const el = renderer.domElement, ray = new THREE.Raycaster(), mv = new THREE.Vector2();
-function hit(e) { const r = el.getBoundingClientRect(); mv.set((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1); ray.setFromCamera(mv, cam); const h = ray.intersectObjects(clickables, false)[0]; return h && h.object.userData.k; }
-el.addEventListener('pointerdown', e => { drag = true; moved = 0; px = e.clientX; py = e.clientY; ptype = e.pointerType; wrap.style.cursor = 'grabbing'; });
-addEventListener('pointerup', e => { if (drag && moved < (ptype === 'mouse' ? 6 : 14)) { const k = hit(e); if (k) select(k, true); } drag = false; wrap.style.cursor = 'grab'; });
-addEventListener('pointercancel', () => { drag = false; });
-addEventListener('pointermove', e => {
-  if (drag) { const dx = e.clientX - px, dy = e.clientY - py; moved += Math.abs(dx) + Math.abs(dy); px = e.clientX; py = e.clientY; th -= dx * 0.006; if (ptype === 'mouse') ph = Math.min(1.35, Math.max(0.3, ph - dy * 0.005)); placeCam(); tip.style.opacity = 0; return; }
-  if (e.target !== el) { tip.style.opacity = 0; return; }
-  const k = hit(e); el.style.cursor = k ? 'pointer' : ''; if (!k) { tip.style.opacity = 0; return; }
-  const it = item(k); if (!it) return; const r = wrap.getBoundingClientRect();
-  tip.innerHTML = it.a ? '<b>' + esc(it.a.description) + '</b>' + esc(ETATS[it.a.etat].t) + ' · ' + esc(it.s.nom) : '<b>' + esc(it.s.nom) + '</b>Session ' + esc(ETATS[it.s.etat].t) + ' · ' + it.s.agents.length + ' agent' + (it.s.agents.length > 1 ? 's' : '');
-  tip.style.left = Math.min(e.clientX - r.left + 14, r.width - 290) + 'px'; tip.style.top = Math.min(e.clientY - r.top + 14, r.height - 80) + 'px'; tip.style.opacity = 1;
-});
-el.addEventListener('wheel', e => { e.preventDefault(); radTo = rad = Math.min(maxRad(), Math.max(5, rad + e.deltaY * 0.03)); placeCam(); }, { passive: false });
-
-const geo = new THREE.SphereGeometry(0.1, 10, 8);
-function sendPacket(k) {
-  const live = Object.keys(anchors).filter(x => x.startsWith('a:') && labels[x] && labels[x].always);
-  k = k || live[Math.random() * live.length | 0]; if (!k) return;
-  const sid = k.split(':')[1], from = anchors['s:' + sid]; if (!from) return;
-  const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xE8B04B })); scene.add(m);
-  packets.push({ m, from: from.clone().setY(1.9), to: anchors[k].clone(), t: 0, back: Math.random() < 0.35 });
+const plan = $('plan');
+plan.addEventListener('click', e => { const b = e.target.closest('.pers'); if (b) choisir(b.dataset.k, true); });
+plan.addEventListener('dragstart', e => { const b = e.target.closest('.pers'); if (!b) return; e.dataTransfer.setData('text/plain', b.dataset.k); e.dataTransfer.effectAllowed = 'move'; b.classList.add('glisse'); });
+plan.addEventListener('dragend', e => { const b = e.target.closest('.pers'); if (b) b.classList.remove('glisse'); plan.querySelectorAll('.cible').forEach(x => x.classList.remove('cible')); });
+plan.addEventListener('dragover', e => { const p = e.target.closest('.piece'); if (!p) return; e.preventDefault(); plan.querySelectorAll('.cible').forEach(x => x !== p && x.classList.remove('cible')); p.classList.add('cible'); });
+plan.addEventListener('drop', e => { const p = e.target.closest('.piece'); if (!p) return; e.preventDefault(); p.classList.remove('cible'); deplacer(e.dataTransfer.getData('text/plain'), p.dataset.b); });
+plan.addEventListener('submit', e => { if (e.target.id !== 'f-bureau') return; e.preventDefault(); const nom = e.target.nom.value.trim(); if (nom) envoyer({ op: 'bureau.creer', nom }); });
+function deplacer(cle, bureau) {
+  const a = A.get(cle), s = S.get(cle); if (!a && !s) return;
+  // Un agent qui rejoint le bureau de sa session reprend la place par défaut (il suivra sa session)
+  const cible = a && S.get(a.session) && S.get(a.session).bureau === bureau ? null : bureau;
+  if ((a || s).bureau === bureau && cible !== null) return;
+  envoyer({ op: 'deplacer', cle, bureau: cible });
 }
 
-// ---------- Fiche et annuaire ----------
-function item(k) { const [t, sid, aid] = k.split(':'), s = findS(sid); if (!s) return null; return t === 'a' ? (s.agents.find(a => a.id === aid) ? { s, a: s.agents.find(a => a.id === aid) } : null) : { s }; }
-const fiche = $('fiche');
-function etatTag(e) { return '<span class="etat" style="--e:' + ETATS[e].css + '">' + ETATS[e].t + '</span>'; }
+// ---------- Fiche ----------
+function options(liste, val, vide) { return (vide ? '<option value="">' + esc(vide) + '</option>' : '') + liste.map(([v, t]) => '<option value="' + esc(v) + '"' + (v === val ? ' selected' : '') + '>' + esc(t) + '</option>').join(''); }
+const optBureaux = val => options(D.organisation.bureaux.map(b => [b.id, b.nom]), val);
+function mini(m) {
+  const t = [['Durée', duree(m.dureeMs)], ['Temps actif', duree(m.actifMs)], ['Outils', nb(m.outils)], ['Erreurs', m.outils ? pct(m.tauxErreur) : '—'], ['Éditions', nb(m.editions)], ['Fichiers', nb(m.fichiers)],
+    ['Commits', nb(m.commits)], ['Jetons', nb(m.jetons)], ['Coût estimé', dollars(m.cout)]];
+  return '<div class="mini">' + t.map(([k, v]) => '<div><b>' + v + '</b><span>' + k + '</span></div>').join('') + '</div>';
+}
+function blocNom(x) {
+  return '<div><p class="kicker">Nom affiché</p><form class="ligne" data-act="renommer"><input type="text" name="nom" maxlength="60" value="' + esc(x.nom) + '" aria-label="Nom affiché"><button class="btn" type="submit">Renommer</button>'
+    + (x.renomme ? '<button class="btn" type="button" data-act="nom-origine">Nom d\'origine</button>' : '') + '</form>' + (x.renomme ? '<p class="orig">À l\'origine : ' + esc(x.nomOrigine) + '</p>' : '') + '</div>';
+}
 function renderFiche() {
-  const it = sel && item(sel);
-  if (!it) { fiche.innerHTML = '<p class="kicker">Fiche</p><p class="none">' + (DATA ? 'Clique sur une personne ou une carte pour voir ce qu\'elle fait.' : 'Chargement…') + '</p>'; return; }
-  const s = it.s, c = hex(colOf(s));
-  if (it.a) {
-    const a = it.a, build = DATA.mac && a.worktree && DATA.mac.builds.includes(a.worktree);
-    fiche.innerHTML = '<div class="who"><span class="badge" style="--c:' + c + '">' + esc(a.type) + '</span>' + etatTag(a.etat) + (a.arrierePlan ? '<span class="when">arrière-plan</span>' : '') + '</div>'
-      + '<div><p class="kicker">' + (a.etat === 'en_cours' || a.etat === 'en_attente' ? 'Travaille sur' : 'A travaillé sur') + '</p><h2>' + esc(a.description) + '</h2></div>'
-      + (a.consigne ? '<div><p class="kicker">Début de sa consigne</p><p class="consigne">' + esc(a.consigne) + '</p></div>' : '')
-      + '<dl class="meta"><dt>Session</dt><dd>' + esc(s.nom) + '</dd><dt>Projet</dt><dd>' + esc(s.projet) + '</dd>' + (a.worktree ? '<dt>Worktree</dt><dd>' + esc(a.worktree) + '</dd>' : '')
-      + (build ? '<dt>Mac</dt><dd style="color:var(--warn)">build en cours</dd>' : '') + '<dt>Activité</dt><dd>' + ago(a.derniereActivite) + '</dd></dl>'
-      + '<button type="button" class="crd" style="--e:' + c + '" data-k="s:' + esc(s.id) + '"><span class="nm">← Session ' + esc(s.nom) + '</span></button>';
+  const f = $('fiche'); if (occupe(f)) return;
+  const x = sel && (A.get(sel) || S.get(sel));
+  if (!x) { f.innerHTML = '<p class="kicker">Fiche</p><p class="none">' + (D ? 'Clique sur une personne pour voir ce qu\'elle fait, la renommer ou la changer de bureau.' : 'Chargement…') + '</p>'; return; }
+  const e = ETATS[x.etat], c = couleur(x.projet), p = P.get(x.projet), st = x.stats || {};
+  if (x.cle.startsWith('a:')) {
+    const s = S.get(x.session), build = D.poste && x.worktree && D.poste.builds.includes(x.worktree);
+    f.innerHTML = '<div class="who"><span class="badge" style="--c:' + c + '">' + esc(x.type) + '</span><span class="etat" style="--e:' + e.css + '">' + e.t + '</span>' + (x.arrierePlan ? '<span class="orig">arrière-plan</span>' : '') + '</div>'
+      + '<div><p class="kicker">' + (e.vif ? 'Travaille sur' : 'A travaillé sur') + '</p><h2>' + esc(x.nom) + '</h2></div>'
+      + blocNom(x)
+      + '<label class="ligne"><span class="kicker" style="margin:0;flex:0 0 auto">Bureau</span><select data-act="bureau">' + optBureaux(x.bureau) + '</select></label>'
+      + mini(x.mesures)
+      + (x.consigne ? '<div><p class="kicker">Début de sa consigne</p><p class="consigne">' + esc(x.consigne) + '</p></div>' : '')
+      + '<dl class="meta"><dt>Session</dt><dd>' + (s ? '<button type="button" class="btn petit" data-k="' + esc(s.cle) + '">' + esc(s.nom) + '</button>' : '—') + '</dd><dt>Projet</dt><dd>' + esc(p ? p.nom : '—') + '</dd>'
+      + (x.worktree ? '<dt>Worktree</dt><dd>' + esc(x.worktree) + (build ? ' · <span style="color:var(--warn)">build en cours</span>' : '') + '</dd>' : '')
+      + (st.branche ? '<dt>Branche</dt><dd>' + esc(st.branche) + '</dd>' : '') + (st.modele ? '<dt>Modèle</dt><dd>' + esc(st.modele) + '</dd>' : '')
+      + '<dt>Début</dt><dd>' + (x.debut ? new Date(x.debut).toLocaleString('fr-FR') : '—') + '</dd><dt>Activité</dt><dd>' + ago(x.derniereActivite) + '</dd></dl>';
   } else {
-    const n = k => s.agents.filter(a => a.etat === k).length;
-    fiche.innerHTML = '<div class="who"><span class="badge" style="--c:' + c + '">session</span>' + etatTag(s.etat) + '</div>'
-      + '<div><p class="kicker">Lead</p><h2>' + esc(s.nom) + '</h2></div>'
-      + '<dl class="meta"><dt>Projet</dt><dd>' + esc(s.projet) + '</dd>' + (s.cwd ? '<dt>Dossier</dt><dd>' + esc(s.cwd.replace(/^\/Users\/[^/]+/, '~')) + '</dd>' : '')
-      + '<dt>Agents</dt><dd>' + s.agents.length + (s.agents.length ? ' · ' + ['en_cours', 'en_attente', 'termine', 'interrompu'].filter(n).map(k => n(k) + ' ' + ETATS[k].t).join(' · ') : '') + '</dd>'
-      + '<dt>Activité</dt><dd>' + ago(s.derniereActivite) + '</dd></dl>'
-      + (s.agents.length ? '<div><p class="kicker">Son équipe</p><ul class="alist">' + s.agents.map(a => '<li><button type="button" data-k="a:' + esc(s.id) + ':' + esc(a.id) + '"><span class="dot" style="background:' + ETATS[a.etat].css + '"></span>' + esc(a.description) + '</button></li>').join('') + '</ul></div>' : '<p class="none">Aucun agent lancé dans les dernières 24 h.</p>');
+    const o = D.organisation, ag = x.agents.map(k => A.get(k)).filter(Boolean), tot = ag.reduce((t, a) => { for (const k of ['jetons', 'cout', 'editions', 'commits']) t[k] += a.mesures[k]; return t; }, { jetons: 0, cout: 0, editions: 0, commits: 0 });
+    const on = (v, t, act) => '<button type="button" class="btn petit' + (v ? ' prim' : '') + '" aria-pressed="' + v + '" data-act="' + act + '">' + t + '</button>';
+    f.innerHTML = '<div class="who"><span class="badge" style="--c:' + c + '">session</span><span class="etat" style="--e:' + e.css + '">' + e.t + '</span>' + rolesDe(x.cle).map(r => '<span class="role ' + r[1] + '">' + esc(r[0]) + '</span>').join('') + '</div>'
+      + '<div><p class="kicker">Lead</p><h2>' + esc(x.nom) + '</h2></div>'
+      + blocNom(x)
+      + '<div><p class="kicker">Rôles</p><div class="ligne">' + on(o.roles.chefProjet === x.cle, 'Chef de projet global', 'chef') + on(o.roles.techLead === x.cle, 'Tech lead global', 'tl')
+      + (p ? on(p.techLead === x.cle, 'Tech lead de ' + esc(p.nom), 'tlp') : '') + '</div></div>'
+      + '<label class="ligne"><span class="kicker" style="margin:0;flex:0 0 auto">Projet</span><select data-act="projet">' + options(o.projets.map(q => [q.id, q.nom]), x.projet) + '</select></label>'
+      + '<label class="ligne"><span class="kicker" style="margin:0;flex:0 0 auto">Bureau</span><select data-act="bureau">' + optBureaux(x.bureau) + '</select></label>'
+      + '<div><p class="kicker">Travail du lead</p>' + mini(x.mesures) + '</div>'
+      + (ag.length ? '<p class="orig">Son équipe : ' + ag.length + ' agent' + (ag.length > 1 ? 's' : '') + ', ' + nb(tot.editions) + ' éditions, ' + nb(tot.commits) + ' commits, ' + nb(tot.jetons) + ' jetons, ' + dollars(tot.cout) + '</p>' : '')
+      + '<dl class="meta">' + (x.cwd ? '<dt>Dossier</dt><dd>' + esc(x.cwd.replace(/^(\/Users|\/home|C:\\Users)[\\/][^\\/]+/i, '~')) + '</dd>' : '') + '<dt>Dépôt</dt><dd>' + esc(x.depot) + '</dd>'
+      + (st.branche ? '<dt>Branche</dt><dd>' + esc(st.branche) + '</dd>' : '') + (st.modele ? '<dt>Modèle</dt><dd>' + esc(st.modele) + '</dd>' : '') + '<dt>Activité</dt><dd>' + ago(x.derniereActivite) + '</dd></dl>'
+      + (ag.length ? '<div><p class="kicker">Son équipe</p><ul class="alist">' + ag.map(a => '<li><button type="button" data-k="' + esc(a.cle) + '"><span class="dot" style="--e:' + ETATS[a.etat].css + '"></span>' + esc(a.nom) + '</button></li>').join('') + '</ul></div>' : '<p class="none">Aucun agent lancé.</p>');
   }
 }
-fiche.addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (b) select(b.dataset.k, false); });
-
-function renderDir(list) {
-  $('dir').innerHTML = list.map(s => {
-    const c = hex(colOf(s));
-    return '<div class="team' + (s.etat === 'terminee' ? ' fini' : '') + '"><h3 tabindex="0" role="button" data-k="s:' + esc(s.id) + '"><span class="dot" style="background:' + c + '"></span>' + esc(s.nom) + '<small>' + esc(s.projet) + ' · ' + ETATS[s.etat].t + ' · ' + s.agents.length + ' agent' + (s.agents.length > 1 ? 's' : '') + '</small></h3>'
-      + (s.agents.length ? '<div class="grid">' + s.agents.map(a => { const k = 'a:' + s.id + ':' + a.id;
-        return '<button type="button" class="crd' + (sel === k ? ' on' : '') + '" style="--e:' + ETATS[a.etat].css + '" data-k="' + esc(k) + '"><span class="nm">' + esc(a.description) + '</span><span class="ms">' + ETATS[a.etat].t + ' · ' + ago(a.derniereActivite) + '</span></button>'; }).join('') + '</div>' : '<p class="none">Aucun agent lancé.</p>') + '</div>';
-  }).join('') || '<p class="none">Aucune session à afficher.</p>';
+const fiche = $('fiche');
+fiche.addEventListener('click', e => {
+  const k = e.target.closest('[data-k]'); if (k) return choisir(k.dataset.k, false);
+  const b = e.target.closest('[data-act]'); if (!b || b.tagName === 'SELECT' || b.tagName === 'FORM') return;
+  const x = A.get(sel) || S.get(sel), o = D.organisation; if (!x) return;
+  if (b.dataset.act === 'nom-origine') envoyer({ op: 'renommer', cle: x.cle, nom: null });
+  if (b.dataset.act === 'chef') envoyer({ op: 'role', role: 'chefProjet', cle: o.roles.chefProjet === x.cle ? null : x.cle });
+  if (b.dataset.act === 'tl') envoyer({ op: 'role', role: 'techLead', cle: o.roles.techLead === x.cle ? null : x.cle });
+  if (b.dataset.act === 'tlp') { const p = P.get(x.projet); envoyer({ op: 'projet.techLead', id: p.id, cle: p.techLead === x.cle ? null : x.cle }); }
+});
+fiche.addEventListener('submit', e => { e.preventDefault(); const x = A.get(sel) || S.get(sel); if (x && e.target.dataset.act === 'renommer') envoyer({ op: 'renommer', cle: x.cle, nom: e.target.nom.value.trim() || null }).then(() => e.target.nom.blur()); });
+fiche.addEventListener('change', e => {
+  const x = A.get(sel) || S.get(sel); if (!x) return;
+  if (e.target.dataset.act === 'bureau') { deplacer(x.cle, e.target.value); e.target.blur(); }
+  if (e.target.dataset.act === 'projet') { envoyer({ op: 'session.projet', cle: x.cle, projet: e.target.value }); e.target.blur(); }
+});
+function choisir(k, depuisPlan) {
+  sel = k; store.set('bureau.sel', k);
+  if (vue !== 'plan') montrer('plan');
+  document.querySelectorAll('.pers.on').forEach(c => c.classList.remove('on'));
+  document.querySelectorAll('.pers[data-k="' + CSS.escape(k) + '"]').forEach(c => c.classList.add('on'));
+  $('fiche').innerHTML = ''; renderFiche();
+  if (matchMedia('(max-width:980px)').matches && depuisPlan) $('fiche').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
-$('dir').addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (b) select(b.dataset.k, false); });
-$('dir').addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('h3[data-k]')) { e.preventDefault(); select(e.target.dataset.k, false); } });
 
-function select(k, fromScene) {
-  sel = k; renderFiche();
-  document.querySelectorAll('.crd.on').forEach(c => c.classList.remove('on'));
-  document.querySelectorAll('#dir [data-k="' + CSS.escape(k) + '"]').forEach(c => c.classList.add('on'));
-  if (fromScene) { if (matchMedia('(max-width:860px)').matches) fiche.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
-  else { wrap.scrollIntoView({ behavior: 'smooth', block: 'start' }); viewAt(k, k.startsWith('s:') ? 13 : 8); }
-  if (k.startsWith('a:')) for (let i = 0; i < 3; i++) setTimeout(() => sendPacket(k), i * 180);
+// ---------- Rendement ----------
+const COLS = [['cout', 'Coût est.', dollars], ['jetons', 'Jetons', nb], ['dureeMs', 'Durée', duree], ['actifMs', 'Actif', duree], ['outils', 'Outils', nb], ['tauxErreur', 'Erreurs', pct], ['editions', 'Éditions', nb], ['fichiers', 'Fichiers', nb], ['commits', 'Commits', nb]];
+function tableLignes(lignes, cle) {
+  const t = tri[cle], l = [...lignes].sort((a, b) => (t.c === 'nom' ? a.nom.localeCompare(b.nom) : (a[t.c] || 0) - (b[t.c] || 0)) * (t.asc ? 1 : -1)).slice(0, 200);
+  const th = (c, txt) => '<th><button type="button" data-tri="' + cle + ':' + c + '"' + (t.c === c ? ' aria-sort="' + (t.asc ? 'ascending' : 'descending') + '"' : '') + '>' + txt + '</button></th>';
+  return '<div class="tbl"><table><thead><tr>' + th('nom', cle === 'agents' ? 'Agent' : 'Session') + '<th>État</th><th>Projet</th>' + COLS.map(([c, txt]) => th(c, txt)).join('') + '</tr></thead><tbody>'
+    + (l.length ? l.map(x => { const p = P.get(x.projet); return '<tr><td><button type="button" class="lien" data-k="' + esc(x.cle) + '">' + esc(x.nom) + '</button></td><td>' + ETATS[x.etat].t + '</td><td>' + (p ? '<span class="sw" style="--c:' + couleur(p.id) + '"></span>' + esc(p.nom) : '—') + '</td>'
+      + COLS.map(([c, , f]) => '<td>' + (c === 'tauxErreur' && !x.outils ? '—' : f(x[c])) + '</td>').join('') + '</tr>'; }).join('') : '<tr><td colspan="12" class="none">Rien sur cette période.</td></tr>') + '</tbody></table></div>';
+}
+function tableGroupes(groupes, nommer) {
+  const l = Object.entries(groupes).sort((a, b) => b[1].cout - a[1].cout);
+  return '<div class="tbl"><table><thead><tr><th>Nom</th><th>Agents</th><th>Terminés</th><th>En cours</th><th>Durée moy.</th><th>Actif</th><th>Erreurs</th><th>Éditions</th><th>Commits</th><th>Jetons</th><th>Coût est.</th></tr></thead><tbody>'
+    + (l.length ? l.map(([k, g]) => { const [n, c] = nommer(k); return '<tr><td><span class="sw" style="--c:' + c + '"></span>' + esc(n) + '</td><td>' + g.agents + (g.sessions ? ' + ' + g.sessions + ' lead' + (g.sessions > 1 ? 's' : '') : '') + '</td><td>' + g.termines + '</td><td>' + (g.enCours + g.enAttente)
+      + '</td><td>' + duree(g.dureeMoyenneMs) + '</td><td>' + duree(g.actifMs) + '</td><td>' + (g.outils ? pct(g.tauxErreur) : '—') + '</td><td>' + nb(g.editions) + '</td><td>' + nb(g.commits) + '</td><td>' + nb(g.jetons) + '</td><td>' + dollars(g.cout) + '</td></tr>'; }).join('')
+      : '<tr><td colspan="11" class="none">Rien sur cette période.</td></tr>') + '</tbody></table></div>';
+}
+function renderRendement() {
+  const k = D.kpi, g = k.global, lib = { '1h': 'la dernière heure', '24h': 'les dernières 24 h', '7j': 'les 7 derniers jours' }[fen];
+  const tile = (t, v, d) => '<div class="tile"><span class="k">' + t + '</span><span class="v">' + v + '</span>' + (d ? '<span class="d">' + d + '</span>' : '') + '</div>';
+  $('v-rendement').innerHTML = '<div class="vue-grid"><div class="bloc"><div class="bloc-h"><h2>Rendement sur ' + lib + '</h2><p>Agents et leads actifs pendant la période ; leurs compteurs portent sur toute leur durée. Coût estimé au prix public des API.</p></div><div class="tiles">'
+    + tile('Agents actifs', nb(g.agents), g.sessions + ' session' + (g.sessions > 1 ? 's' : '') + ' (leads)') + tile('Agents terminés', nb(g.termines), fr(g.terminesParHeure) + ' par heure')
+    + tile('En cours', nb(g.enCours + g.enAttente), g.enAttente ? g.enAttente + ' en attente' : '') + tile('Durée moyenne', duree(g.dureeMoyenneMs), 'des agents terminés')
+    + tile('Temps actif cumulé', duree(g.actifMs)) + tile('Erreurs d\'outils', g.outils ? pct(g.tauxErreur) : '—', nb(g.erreurs) + ' sur ' + nb(g.outils) + ' appels')
+    + tile('Éditions', nb(g.editions), nb(g.fichiers) + ' fichiers') + tile('Commits', nb(g.commits)) + tile('Jetons', nb(g.jetons)) + tile('Coût estimé', dollars(g.cout), dollars(g.coutMoyen) + ' en moyenne') + '</div></div>'
+    + '<div class="bloc"><h3>Par projet</h3>' + tableGroupes(k.projets, id => { const p = P.get(id); return [p ? p.nom : 'Sans projet', couleur(p && p.id)]; }) + '</div>'
+    + '<div class="bloc"><h3>Par bureau</h3>' + tableGroupes(k.bureaux, id => { const b = B.get(id); return [b ? b.nom : id, couleur(id)]; }) + '</div>'
+    + '<div class="bloc"><h3>Agents</h3>' + tableLignes(k.agents.map(l => ({ ...l, nom: nomDe(l.cle) })), 'agents') + '</div>'
+    + '<div class="bloc"><h3>Sessions (travail des leads)</h3>' + tableLignes(k.sessions.map(l => ({ ...l, nom: nomDe(l.cle) })), 'sessions') + '</div></div>';
+}
+$('v-rendement').addEventListener('click', e => {
+  const t = e.target.closest('[data-tri]'); if (t) { const [cle, c] = t.dataset.tri.split(':'); tri[cle] = { c, asc: tri[cle].c === c ? !tri[cle].asc : c === 'nom' }; renderRendement(); return; }
+  const k = e.target.closest('[data-k]'); if (k) choisir(k.dataset.k, false);
+});
+
+// ---------- Poste ----------
+const ST = { ok: 'normal', warn: 'vigilance', risk: 'risque', na: 'non disponible' };
+function lvl(v, warn, risk, inv) { if (v == null) return 'na'; return inv ? (v < risk ? 'risk' : v < warn ? 'warn' : 'ok') : (v > risk ? 'risk' : v > warn ? 'warn' : 'ok'); }
+function spark(arr, max) {
+  arr = arr.filter(v => v != null); if (arr.length < 2) return '';
+  if (arr.length > 120) { const s = arr.length / 120; arr = Array.from({ length: 120 }, (_, i) => arr[Math.floor(i * s)]); }
+  const w = 160, h = 28, n = arr.length, pts = arr.map((v, i) => [i / (n - 1) * w, h - 2 - Math.min(1, v / max) * (h - 4)]);
+  const d = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  return '<svg class="spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" aria-hidden="true"><path d="' + d + ' L' + w + ' ' + h + ' L0 ' + h + ' Z" fill="var(--st)" opacity=".12"/><path d="' + d + '" fill="none" stroke="var(--st)" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>';
+}
+function renderPoste() {
+  const d = D.poste, el = $('v-poste'); if (!d) { el.innerHTML = '<p class="none">Premier relevé en cours…</p>'; return; }
+  // Swap total à 0 : aucun fichier de swap créé pour l'instant, donc 0 % utilisé (et non « indisponible »)
+  const H = d.historique || [], ratio = d.load1 != null ? d.load1 / d.ncpu : null, swapPct = d.swapTotalGo == null ? null : d.swapTotalGo ? 100 * d.swapUtiliseGo / d.swapTotalGo : 0;
+  const diskPct = d.disqueTotalGo ? 100 * d.disqueLibreGo / d.disqueTotalGo : null, nbB = d.builds.length, win = d.plateforme === 'win32';
+  const K = [
+    { k: 'Processeur', s: lvl(d.cpuPct, 75, 92), v: d.cpuPct == null ? 'mesure…' : fr(d.cpuPct, 0) + ' %', sub: d.ncpu + ' cœurs', pct: d.cpuPct, sp: spark(H.map(x => x.cpu), 100), dsc: 'Utilisation moyenne de tous les cœurs' },
+    { k: 'Charge', s: lvl(ratio, 1, 2), v: ratio == null ? 'non disponible' : fr(ratio) + '×', sub: ratio == null ? '' : fr(d.load1) + ' / ' + d.ncpu, pct: ratio == null ? 0 : Math.min(100, ratio / 3 * 100), sp: ratio == null ? '' : spark(H.map(x => x.load != null ? x.load / d.ncpu : null), 3),
+      dsc: ratio == null ? 'Windows ne fournit pas de charge moyenne' : 'Sur 5 min : ' + fr(d.load5) + ', sur 15 min : ' + fr(d.load15) },
+    { k: win ? 'Fichier d\'échange' : 'Swap', s: lvl(swapPct, 50, 80), v: swapPct == null ? 'non disponible' : fr(swapPct, 0) + ' %', sub: swapPct == null ? '' : fr(d.swapUtiliseGo) + ' / ' + fr(d.swapTotalGo) + ' Go', pct: swapPct, sp: spark(H.map(x => x.swap), 100), dsc: 'Le disque sert de mémoire quand les ' + d.memGo + ' Go ne suffisent plus' },
+    { k: 'Mémoire libre', s: lvl(d.memLibrePct, 30, 15, true), v: d.memLibrePct == null ? 'non disponible' : d.memLibrePct + ' %', sub: 'sur ' + d.memGo + ' Go', pct: d.memLibrePct, dsc: d.plateforme === 'darwin' ? 'Mesure de pression mémoire de macOS' : 'Mémoire disponible pour les programmes' },
+    { k: 'Disque libre', s: lvl(diskPct, 20, 10, true), v: diskPct == null ? 'non disponible' : fr(diskPct, 0) + ' %', sub: diskPct == null ? '' : fr(d.disqueLibreGo, 0) + ' Go sur ' + d.disqueTotalGo, pct: diskPct == null ? 0 : 100 - diskPct, dsc: 'Sous 10 %, le système ralentit et le swap peut manquer de place' },
+    { k: 'Builds en parallèle', s: win ? 'na' : lvl(nbB, 3, 5), v: win ? String(d.jvms) + ' JVM' : String(nbB), sub: win ? '' : d.jvms + ' JVM', pct: Math.min(100, nbB / 10 * 100), dsc: win ? 'Worktree des builds non lisible sous Windows' : nbB ? 'Worktrees : ' + d.builds.join(', ') : 'Aucun build de worktree en cours' },
+    { k: 'Alimentation', s: d.batteriePct == null ? 'na' : (!d.secteur && d.batteriePct < 20) ? 'risk' : (!d.secteur && d.batteriePct < 40) ? 'warn' : 'ok', v: d.batteriePct == null ? 'secteur' : d.secteur ? 'secteur' : d.batteriePct + ' %',
+      sub: d.batteriePct != null && d.secteur ? 'batterie ' + d.batteriePct + ' %' : d.batteriePct != null ? 'sur batterie' : '', pct: d.batteriePct || 0, dsc: d.batteriePct == null ? 'Pas de batterie détectée' : d.secteur ? 'Branché' : 'Débranché : les builds vident la batterie vite' },
+    { k: 'Température', s: d.thermique == null ? 'na' : d.thermique === 'ok' ? 'ok' : 'risk', v: d.thermique == null ? 'non disponible' : d.temperatureC != null ? fr(d.temperatureC, 0) + ' °C' : d.thermique === 'ok' ? 'normale' : 'alerte', sub: '', pct: d.thermique === 'alerte' ? 100 : 0,
+      dsc: d.thermique == null ? 'Aucun capteur lisible sur ce système' : d.thermique === 'ok' ? 'Pas de bridage du processeur' : 'Le système bride le processeur pour le refroidir' }];
+  const ss = K.map(x => x.s), worst = ss.includes('risk') ? 'risk' : ss.includes('warn') ? 'warn' : 'ok', nR = ss.filter(s => s === 'risk').length, nW = ss.filter(s => s === 'warn').length;
+  const why = []; if (swapPct > 80) why.push('le swap est presque plein'); if (ratio > 2) why.push('la charge est à ' + fr(ratio) + ' fois le nombre de cœurs'); if (d.cpuPct > 92) why.push('le processeur est saturé'); if (nbB > 5) why.push(nbB + ' builds tournent en même temps'); if (diskPct != null && diskPct < 10) why.push('le disque est presque plein'); if (d.thermique === 'alerte') why.push('le poste chauffe'); if (!d.secteur && d.batteriePct != null && d.batteriePct < 20) why.push('la batterie est presque vide');
+  const todo = [];
+  if (nbB > 3) todo.push('Limiter les vérifications à 2 ou 3 builds en même temps (' + nbB + ' en cours)');
+  if (ratio > 2 && nbB <= 3) todo.push('Attendre la fin des builds en cours avant d\'en lancer d\'autres');
+  if (swapPct > 80) todo.push('Redémarrer après les fusions' + (d.allumeJours ? ' (allumé depuis ' + d.allumeJours + ' jours)' : '') + ' : le swap ne se vide pas sans ça');
+  const vm = (d.top || []).find(h => h.n === 'Machine virtuelle Docker'); if (vm && vm.cpu > 100) todo.push('Quitter Docker quand les conteneurs ne servent plus');
+  if (diskPct != null && diskPct < 20) todo.push('Libérer de la place : worktrees fusionnés, caches des IDE');
+  if (d.batteriePct != null && !d.secteur && d.batteriePct < 40) todo.push('Brancher le poste');
+  if (!todo.length) todo.push('Rien à faire pour l\'instant');
+  el.innerHTML = '<div class="vue-grid"><div class="bloc"><div class="bloc-h"><h2>Santé du poste</h2><p>' + esc(d.hote) + ' · ' + esc(d.systeme) + ' · relevé ' + ago(d.epoch * 1000) + '</p></div>'
+    + '<div class="verdict st-' + worst + '"><b>' + (worst === 'risk' ? 'Utilisation à risque' : worst === 'warn' ? 'À surveiller' : 'Tout va bien') + '</b><span>'
+    + (worst === 'risk' ? nR + ' indicateur' + (nR > 1 ? 's' : '') + ' au rouge : ' + why.join(', ') + '. Le poste peut figer et des tests échouer par délai dépassé.' : worst === 'warn' ? nW + ' indicateur' + (nW > 1 ? 's' : '') + ' à surveiller, rien de bloquant pour l\'instant.' : 'Processeur, mémoire et disque dans les seuils.') + '</span></div>'
+    + '<div class="kpis">' + K.map(x => '<div class="kpi st-' + x.s + (x.s === 'na' ? ' na' : '') + '"><div class="k">' + x.k + '<span class="pill">' + ST[x.s] + '</span></div><div class="v">' + x.v + (x.sub ? ' <small>' + esc(x.sub) + '</small>' : '') + '</div>'
+      + (x.sp || (x.s === 'na' ? '' : '<div class="bar"><i style="width:' + Math.round(Math.max(0, Math.min(100, x.pct || 0))) + '%"></i></div>')) + '<div class="d">' + esc(x.dsc) + '</div></div>').join('') + '</div></div>'
+    + '<div class="cols"><div class="bloc"><h3>Ce qui consomme</h3><ul class="hogs">' + (d.top || []).map(h => '<li><span>' + esc(h.n) + '</span><em>' + h.cpu + ' % · ' + (h.mem >= 1024 ? fr(h.mem / 1024) + ' Go' : h.mem + ' Mo') + '</em>' + (h.count > 1 ? '<small>' + h.count + ' processus</small>' : '') + '</li>').join('') + '</ul></div>'
+    + '<div class="bloc"><h3>Pour faire baisser le risque</h3><ol class="todo">' + todo.map(t => '<li>' + esc(t) + '</li>').join('') + '</ol></div></div>'
+    + '<p class="seuils">Seuils : processeur 75 % / 92 % · charge 1× / 2× les cœurs · swap 50 % / 80 % · mémoire libre 30 % / 15 % · disque libre 20 % / 10 % · builds 3 / 5. Courbes sur les dernières 24 h.</p></div>';
 }
 
-function renderCounts() {
-  const S = DATA.sessions, live = S.filter(s => s.etat !== 'terminee'), A = S.flatMap(s => s.agents), n = e => A.filter(a => a.etat === e).length;
-  $('counts').innerHTML = [[live.length, 'sessions ouvertes'], [S.filter(s => s.etat === 'active').length, 'au travail'], [n('en_cours'), 'agents en cours'], [n('en_attente'), 'en attente'], [n('termine'), 'agents terminés (24 h)']]
+// ---------- Organisation ----------
+function optSessions(val) {
+  const l = [...D.sessions].sort((a, b) => (a.etat === 'terminee') - (b.etat === 'terminee') || b.derniereActivite - a.derniereActivite).map(s => [s.cle, s.nom + ' · ' + s.depot + (s.etat === 'terminee' ? ' (fermée)' : '')]);
+  if (val && !S.has(val)) l.unshift([val, 'session absente des 7 derniers jours']);
+  return options(l, val, 'Personne');
+}
+function renderOrganisation() {
+  const el = $('v-organisation'); if (occupe(el)) return;
+  const o = D.organisation, occ = id => D.sessions.filter(s => s.bureau === id).length + D.agents.filter(a => a.bureau === id).length;
+  const noms = Object.entries(o.noms);
+  el.innerHTML = '<div class="vue-grid">'
+    + '<div class="carte"><h2>Rôles globaux</h2><div class="rang" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))"><label>Chef de projet global<select data-op="role" data-role="chefProjet">' + optSessions(o.roles.chefProjet) + '</select></label>'
+    + '<label>Tech lead global<select data-op="role" data-role="techLead">' + optSessions(o.roles.techLead) + '</select></label></div><p class="none">Un rôle est porté par une session Claude : c\'est elle qui pilote. Le badge s\'affiche sur le plan.</p></div>'
+    + '<div class="carte"><h2>Projets</h2><p class="none">Un projet regroupe un ou plusieurs dépôts. Les nouveaux dépôts créent leur projet et leur bureau automatiquement.</p><div class="rangs">'
+    + o.projets.map(p => '<div class="rang" data-p="' + esc(p.id) + '"><label>Nom<input type="text" maxlength="60" value="' + esc(p.nom) + '" data-op="projet.renommer"></label>'
+      + '<label>Tech lead du projet<select data-op="projet.techLead">' + optSessions(p.techLead) + '</select></label>'
+      + '<label>Bureau par défaut<select data-op="projet.bureau">' + options(o.bureaux.map(b => [b.id, b.nom]), p.bureau, 'Accueil') + '</select></label>'
+      + '<label>Fusionner dans<select data-op="projet.fusionner">' + options(o.projets.filter(q => q.id !== p.id).map(q => [q.id, q.nom]), '', '…') + '</select></label>'
+      + '<div class="depots">Dépôts : ' + (p.depots.length ? p.depots.map(esc).join(', ') : 'aucun (sessions rattachées à la main)') + '</div></div>').join('')
+    + '</div><form class="form-l" data-op="projet.creer"><input type="text" name="nom" maxlength="60" placeholder="Nom du nouveau projet" required><button class="btn prim" type="submit">Créer le projet</button></form></div>'
+    + '<div class="carte"><h2>Bureaux</h2><div class="rangs">' + o.bureaux.map(b => '<div class="rang" data-b="' + esc(b.id) + '" style="grid-template-columns:minmax(0,1fr) auto auto"><label>Nom<input type="text" maxlength="60" value="' + esc(b.nom) + '" data-op="bureau.renommer"></label><span class="none">' + occ(b.id) + ' pers.</span>'
+      + (b.id === 'accueil' ? '<span></span>' : '<button type="button" class="btn dang petit" data-op="bureau.supprimer">Supprimer</button>') + '</div>').join('')
+    + '</div><form class="form-l" data-op="bureau.creer"><input type="text" name="nom" maxlength="60" placeholder="Nom du nouveau bureau" required><button class="btn prim" type="submit">Créer le bureau</button></form></div>'
+    + '<div class="carte"><h2>Noms donnés</h2>' + (noms.length ? '<div class="rangs">' + noms.map(([k, n]) => { const x = A.get(k) || S.get(k); return '<div class="rang" style="grid-template-columns:minmax(0,1fr) auto"><div><b>' + esc(n) + '</b><div class="orig">' + (x ? 'À l\'origine : ' + esc(x.nomOrigine) : 'agent absent des 7 derniers jours') + '</div></div><button type="button" class="btn petit" data-op="renommer" data-cle="' + esc(k) + '">Nom d\'origine</button></div>'; }).join('') + '</div>'
+      : '<p class="none">Aucun nom donné. Renomme un agent ou une session depuis sa fiche.</p>') + '</div></div>';
+}
+const vOrg = $('v-organisation');
+vOrg.addEventListener('change', e => {
+  const t = e.target, op = t.dataset.op, p = t.closest('[data-p]'), b = t.closest('[data-b]'); if (!op) return;
+  if (op === 'role') envoyer({ op, role: t.dataset.role, cle: t.value || null });
+  else if (op === 'projet.renommer' && t.value.trim()) envoyer({ op, id: p.dataset.p, nom: t.value });
+  else if (op === 'projet.techLead') envoyer({ op, id: p.dataset.p, cle: t.value || null });
+  else if (op === 'projet.bureau') envoyer({ op, id: p.dataset.p, bureau: t.value || null });
+  else if (op === 'projet.fusionner' && t.value) { const cible = P.get(t.value); if (confirm('Fusionner « ' + P.get(p.dataset.p).nom + ' » dans « ' + cible.nom + ' » ?')) envoyer({ op, source: p.dataset.p, cible: t.value }); else t.value = ''; }
+  else if (op === 'bureau.renommer' && t.value.trim()) envoyer({ op, id: b.dataset.b, nom: t.value });
+  t.blur();
+});
+vOrg.addEventListener('click', e => {
+  const t = e.target.closest('button[data-op]'); if (!t) return;
+  if (t.dataset.op === 'bureau.supprimer') { const b = B.get(t.closest('[data-b]').dataset.b); if (confirm('Supprimer le bureau « ' + b.nom + ' » ? Ses occupants retournent dans le bureau de leur projet.')) envoyer({ op: 'bureau.supprimer', id: b.id }); }
+  if (t.dataset.op === 'renommer') envoyer({ op: 'renommer', cle: t.dataset.cle, nom: null });
+});
+vOrg.addEventListener('submit', e => { e.preventDefault(); const f = e.target, nom = f.nom.value.trim(); if (nom) envoyer({ op: f.dataset.op, nom }).then(() => { f.nom.value = ''; f.nom.blur(); }); });
+
+// ---------- Rendu général ----------
+function indexer() {
+  S = new Map(D.sessions.map(s => [s.cle, s])); A = new Map(D.agents.map(a => [a.cle, a]));
+  P = new Map(D.organisation.projets.map(p => [p.id, p])); B = new Map(D.organisation.bureaux.map(b => [b.id, b]));
+}
+function renderEntete() {
+  const ouvertes = D.sessions.filter(s => s.etat !== 'terminee'), n = e => D.agents.filter(a => a.etat === e).length, g = D.kpi.global;
+  $('counts').innerHTML = [[ouvertes.length, 'sessions ouvertes'], [D.sessions.filter(s => s.etat === 'active').length, 'au travail'], [n('en_cours'), 'agents en cours'], [n('en_attente'), 'en attente'], [g.termines, 'terminés sur la période'], [dollars(g.cout), 'estimés sur la période']]
     .map(([v, t]) => '<span><b>' + v + '</b>' + t + '</span>').join('');
+  if (D.poste) $('hote').textContent = 'Agents de codage · ' + D.poste.hote + ' · ' + D.poste.systeme;
+  const bd = $('bandeau'), i = D.indexation;
+  bd.hidden = !(D.erreur || (i && i.faits < i.total));
+  bd.textContent = D.erreur ? 'Dernière collecte en erreur : ' + D.erreur : i && i.faits < i.total ? 'Indexation des transcripts : ' + i.faits + ' sur ' + i.total + '…' : '';
+  document.querySelectorAll('#fenetre button').forEach(b => b.setAttribute('aria-checked', b.dataset.f === fen));
 }
+function rendre() {
+  if (!D) return;
+  indexer(); if (sel && !A.has(sel) && !S.has(sel)) sel = null;
+  if (!sel) { const s = D.sessions.find(s => s.etat === 'active') || D.sessions[0]; if (s) sel = s.cle; }
+  renderEntete();
+  if (vue === 'plan') { renderPlan(); renderFiche(); }
+  if (vue === 'rendement') renderRendement();
+  if (vue === 'poste') renderPoste();
+  if (vue === 'organisation') renderOrganisation();
+}
+function montrer(v) {
+  vue = v; store.set('bureau.vue', v);
+  document.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.v === v));
+  document.querySelectorAll('.vue').forEach(s => { s.hidden = s.id !== 'v-' + v; });
+  rendre();
+}
+document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('button[data-v]'); if (b) montrer(b.dataset.v); });
 
-// ---------- Données ----------
-let sig = '', first = true;
-function apply() {
-  const list = visible();
-  const nsig = JSON.stringify(list.map(s => [s.id, s.etat, s.agents.map(a => [a.id, a.etat])]));
-  if (nsig !== sig) { sig = nsig; build(list); if (first) { viewAll(); look.copy(lookTo); rad = radTo; placeCam(); first = false; } }
-  $('empty').hidden = list.length > 0;
-  if (sel && !item(sel)) sel = null;
-  if (!sel) { const s = list.find(s => s.etat === 'active') || list[0]; if (s) sel = 's:' + s.id; }
-  renderCounts(); renderDir(list); renderFiche(); renderMac(DATA.mac);
-  $('when').textContent = 'Mis à jour ' + new Date(DATA.genere).toLocaleTimeString('fr-FR');
-}
-async function load(now) {
-  const btn = $('refresh'), msg = $('refresh-msg');
-  if (now) { btn.classList.add('spin'); btn.disabled = true; msg.textContent = ''; }
+// ---------- Réseau ----------
+const qs = extra => { const p = new URLSearchParams({ fenetre: fen, ...extra }); if (TQ) p.set('t', TQ); return '?' + p; };
+let chargement = null;
+async function charger(maintenant) {
+  const btn = $('actualiser'), msg = $('msg');
+  if (maintenant) { btn.classList.add('spin'); btn.disabled = true; }
   try {
-    const r = await fetch(API + (now ? (API.includes('?') ? '&' : '?') + 'maintenant=1' : ''), { cache: 'no-store' });
+    const r = await fetch('/api/etat' + qs(maintenant ? { maintenant: '1' } : {}), { cache: 'no-store' });
     if (!r.ok) throw new Error(r.status === 401 ? 'jeton refusé' : 'HTTP ' + r.status);
-    DATA = await r.json(); apply(); msg.textContent = now ? 'À jour' : '';
-  } catch (e) { msg.textContent = 'Serveur injoignable (' + e.message + '), nouvel essai dans 10 s'; }
+    D = await r.json(); rendre(); msg.textContent = maintenant ? 'À jour' : '';
+  } catch (e) { msg.textContent = 'Serveur injoignable (' + e.message + ') : nouvel essai dans 10 s'; }
   finally { btn.classList.remove('spin'); btn.disabled = false; }
 }
-$('refresh').onclick = () => load(true);
-$('show-done').onchange = e => { showDone = e.target.checked; store.set('bureau.showDone', showDone ? '1' : '0'); first = true; if (DATA) apply(); };
-setInterval(() => { if (!document.hidden) load(false); }, 10000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) load(false); });
-setInterval(() => { if (DATA) { renderMac(DATA.mac); $('when').textContent = 'Mis à jour ' + ago(DATA.genere); } }, 30000);
-renderFiche(); renderMac(null); load(false);
-
-// ---------- Animation ----------
-const still = matchMedia('(prefers-reduced-motion: reduce)').matches, clock = new THREE.Clock(); let acc = 0;
-function loop() {
-  const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime; acc += dt;
-  if (acc > 0.8 && !still) { acc = 0; sendPacket(); }
-  const ease = still ? 1 : Math.min(1, dt * 4);
-  if (look.distanceTo(lookTo) > 0.01 || Math.abs(rad - radTo) > 0.01) { look.lerp(lookTo, ease); rad += (radTo - rad) * ease; placeCam(); }
-  if (!still) {
-    devs.forEach(d => { d.p.userData.body.position.y = 0.95 + (d.on ? Math.sin(t * 9 + d.ph) * 0.015 : 0); d.p.userData.head.rotation.y = Math.sin(t * (d.on ? 0.6 : 0.2) + d.ph) * 0.35; });
-    screens.forEach(s => s.m.color.copy(s.base).multiplyScalar(s.mode === 'en_cours' ? 0.82 + 0.18 * Math.sin(t * 3 + s.ph) : s.mode === 'en_attente' ? 0.75 + 0.25 * Math.sin(t * 1.2 + s.ph) : 0.7));
-    leads.forEach(l => { l.p.rotation.y = Math.PI + (l.on ? Math.sin(t * 0.5 + l.ph) * 0.9 : 0); });
-  }
-  for (const k in labels) { const { l, always } = labels[k], b = l.userData.base, on = k === sel, f = on ? 1.25 + 0.08 * Math.sin(t * 6) : 1; l.scale.set(b.x * f, b.y * f, 1); l.visible = always || on; }
-  for (let i = packets.length - 1; i >= 0; i--) {
-    const p = packets[i]; p.t += dt * 0.9; const u = Math.min(1, p.t), a = p.back ? p.to : p.from, b = p.back ? p.from : p.to;
-    p.m.position.lerpVectors(a, b, u); p.m.position.y += Math.sin(u * Math.PI) * 1.2;
-    if (u >= 1) { scene.remove(p.m); p.m.material.dispose(); packets.splice(i, 1); }
-  }
-  renderer.render(scene, cam); requestAnimationFrame(loop);
+async function envoyer(op) {
+  try {
+    const h = { 'Content-Type': 'application/json', 'X-Bureau-Csrf': D.csrf }; if (TQ) h['X-Bureau-Token'] = TQ;
+    const r = await fetch('/api/organisation' + (TQ ? '?t=' + encodeURIComponent(TQ) : ''), { method: 'POST', headers: h, body: JSON.stringify(op) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { $('msg').textContent = 'Refusé : ' + (j.erreur || 'HTTP ' + r.status); return; }
+    $('msg').textContent = 'Enregistré';
+  } catch (e) { $('msg').textContent = 'Échec de l\'enregistrement (' + e.message + ')'; }
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  await charger(false);
 }
-loop();
+$('actualiser').onclick = () => charger(true);
+$('fenetre').addEventListener('click', e => { const b = e.target.closest('button[data-f]'); if (!b) return; fen = b.dataset.f; store.set('bureau.fen', fen); charger(false); });
+$('fermees').onchange = e => { fermees = e.target.checked; store.set('bureau.fermees', fermees ? '1' : '0'); rendre(); };
+$('cherche').addEventListener('input', e => { cherche = e.target.value.trim().toLowerCase(); if (vue === 'plan') renderPlan(); });
+setInterval(() => { if (!document.hidden) charger(false); }, 10000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) charger(false); });
+montrer(vue); charger(false);
