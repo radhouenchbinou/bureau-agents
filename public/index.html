@@ -17,7 +17,6 @@
       <div class="seg" role="radiogroup" aria-label="Période des indicateurs" id="fenetre">
         <button type="button" role="radio" data-f="1h">1 h</button><button type="button" role="radio" data-f="24h">24 h</button><button type="button" role="radio" data-f="7j">7 j</button>
       </div>
-      <label class="chk"><input type="checkbox" id="fermees"> Sessions fermées</label>
       <input type="search" id="cherche" placeholder="Chercher un agent…" aria-label="Chercher un agent">
       <span id="msg" aria-live="polite"></span>
       <button type="button" id="actualiser" class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>Actualiser</button>
@@ -34,18 +33,28 @@
 
   <section class="vue" id="v-plan" role="tabpanel">
     <div class="plan-zone">
-      <div>
-        <p class="aide">Glisse une personne ou une session vers un autre bureau. Sur téléphone, ouvre sa fiche et choisis « Bureau ».</p>
-        <div class="plan" id="plan"></div>
+      <div class="scene" id="scene">
+        <canvas id="scene-canvas" aria-label="Plan du bureau en vue isométrique. La liste sous le plan présente les mêmes informations."></canvas>
+        <div id="scene-tip" class="scene-tip"></div>
+        <div class="ctl">
+          <button type="button" id="z-plus" aria-label="Zoomer">+</button>
+          <button type="button" id="z-moins" aria-label="Dézoomer">−</button>
+          <button type="button" id="z-tout" aria-label="Tout voir">⤢</button>
+        </div>
+        <div class="legende"><span><i style="background:var(--run)"></i>À son poste</span><span><i style="background:var(--warn)"></i>En pause</span><span><i style="background:#378ADD"></i>Se déplace</span></div>
       </div>
       <aside class="fiche" id="fiche" aria-live="polite"></aside>
     </div>
+    <p class="aide">Glisse un personnage vers un autre bureau. Au doigt, maintiens-le appuyé avant de le glisser, ou passe par sa fiche.</p>
+    <div class="plan" id="plan"></div>
+    <div id="partis"></div>
   </section>
 
   <section class="vue" id="v-rendement" role="tabpanel" hidden></section>
   <section class="vue" id="v-poste" role="tabpanel" hidden></section>
   <section class="vue" id="v-organisation" role="tabpanel" hidden></section>
 </div>
+<script src="bureau.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

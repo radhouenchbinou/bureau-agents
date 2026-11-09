@@ -34,7 +34,7 @@ h3{font-family:var(--display);font-weight:600;font-size:16px;margin:0}
 .seg button:focus-visible{outline-offset:-3px}
 .chk{display:inline-flex;align-items:center;gap:7px;font-size:13.5px;cursor:pointer;min-height:34px}
 .chk input{width:17px;height:17px;accent-color:var(--lead)}
-input[type=search],input[type=text],select{font:inherit;font-size:13.5px;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:8px;min-height:34px;padding:0 10px;min-width:0}
+input[type=search],input[type=text],input[type=number],select{font:inherit;font-size:13.5px;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:8px;min-height:34px;padding:0 10px;min-width:0}
 input[type=search]{width:200px}
 @media (max-width:520px){input[type=search]{width:100%}}
 #msg{font-size:12.5px;color:var(--muted)}
@@ -56,7 +56,7 @@ input[type=search]{width:200px}
 .aide{margin:0 0 10px;font-size:13px;color:var(--muted)}
 .vue[hidden]{display:none}
 /* Plan des bureaux */
-.plan-zone{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px;align-items:start}
+.plan-zone{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:14px;align-items:start;margin-bottom:12px}
 @media (max-width:980px){.plan-zone{grid-template-columns:minmax(0,1fr)}}
 .plan{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;align-items:start}
 @media (max-width:520px){.plan{grid-template-columns:minmax(0,1fr)}}
@@ -90,6 +90,18 @@ input[type=search]{width:200px}
 .ajout{display:grid;place-items:center;gap:8px;min-height:120px;border:1.5px dashed var(--line);border-radius:12px;padding:14px}
 .ajout form{display:flex;gap:6px;width:100%}
 .ajout input{flex:1}
+.scene{position:relative;height:clamp(420px,68vh,720px);border-radius:14px;overflow:hidden;background:var(--sunk);border:1px solid var(--line);cursor:grab;touch-action:none;-webkit-user-select:none;user-select:none}
+.scene canvas{display:block;width:100%;height:100%;touch-action:none}
+.scene-tip{position:absolute;pointer-events:none;max-width:270px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font-size:12.5px;color:var(--fg);opacity:0;transition:opacity .12s}
+.ctl{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;gap:6px}
+.ctl button{all:unset;box-sizing:border-box;cursor:pointer;background:var(--panel);border:1px solid var(--line);color:var(--fg);border-radius:8px;width:38px;min-height:36px;display:inline-flex;align-items:center;justify-content:center;font-size:17px;line-height:1}
+.ctl button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.legende{position:absolute;left:10px;bottom:10px;display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:4px 9px;pointer-events:none}
+.legende i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
+.partis{margin-top:14px;font-size:13.5px}
+.partis summary{cursor:pointer;color:var(--muted);padding:6px 0}
+.alerte{color:var(--risk);font-weight:500}
+@media (max-width:980px){.scene{height:min(62vh,480px)}}
 /* Fiche */
 .fiche{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;display:grid;gap:14px;align-content:start;min-width:0;position:sticky;top:12px}
 @media (max-width:980px){.fiche{position:static}}

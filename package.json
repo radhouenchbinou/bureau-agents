@@ -1,8 +1,8 @@
 {
   "name": "bureau-agents",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "Plan 2D des agents de codage (Claude Code) d'un poste, avec bureaux, projets, rôles, rendement et santé du poste. macOS, Linux et Windows.",
+  "description": "Bureau 2.5D des agents de codage et modèles locaux d'un poste, avec salle de pause, rôles, rendement et santé du poste. macOS, Linux et Windows.",
   "scripts": {
     "start": "node server.js",
     "test": "node --test",

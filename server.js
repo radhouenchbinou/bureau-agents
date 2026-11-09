@@ -5,6 +5,9 @@
 const http = require('http'), fs = require('fs'), fsp = fs.promises, path = require('path'), os = require('os'), crypto = require('crypto');
 const { IndexTranscripts } = require('./lib/transcript');
 const { SourceClaude } = require('./lib/source-claude');
+const { SourceCodex } = require('./lib/source-codex');
+const processus = require('./lib/source-processus');
+const { presence, Stabilisateur } = require('./lib/presence');
 const { Poste } = require('./lib/poste');
 const org = require('./lib/organisation');
 const { calculer, mesurer } = require('./lib/kpi');
@@ -27,17 +30,36 @@ async function ecrire(f, v) { await fsp.mkdir(DATA, { recursive: true }); const 
 
 const index = new IndexTranscripts(lireJson(F_INDEX) || {});
 const source = new SourceClaude({ dossier: process.env.BUREAU_CLAUDE_DIR || path.join(os.homedir(), '.claude'), horizonMs: HORIZON_J * 864e5, index });
+const codex = new SourceCodex({ dossier: process.env.BUREAU_CODEX_DIR || path.join(os.homedir(), '.codex'), horizonMs: HORIZON_J * 864e5, index });
+const stabilisateur = new Stabilisateur();
 const poste = new Poste({ historique: lireJson(F_HIST) || [] });
 const stock = new org.StockOrganisation(F_ORG);
 
-let scan = { sessions: [], agents: [] }, mesure = null, pret = false, enCours = null, genere = 0, erreur = null;
+let scan = { sessions: [], agents: [] }, locaux = { moteurs: [], modeles: [] }, mesure = null, pret = false, enCours = null, genere = 0, erreur = null;
+// Présence de chacun dans le bureau ; l'état d'un agent vivant suit sa présence
+function placerTous({ sessions, agents }, maintenant) {
+  const seuilMs = stock.o.reglages.seuilPauseMin * 60e3, cles = new Set();
+  for (const x of [...sessions, ...agents]) {
+    const r = presence(x, { maintenant, seuilMs });
+    x.presence = stabilisateur.filtrer(x.cle, r.presence, maintenant); x.raison = x.presence === r.presence ? r.raison : x.presence === 'poste' ? 'travaille' : 'inactif';
+    if (x.cle.startsWith('a:') && x.presence !== 'parti') x.etat = x.presence === 'poste' ? 'en_cours' : 'en_attente';
+    cles.add(x.cle);
+  }
+  stabilisateur.oublier(cles);
+}
+
 // Une seule collecte à la fois : un appel pendant une collecte attend celle qui tourne
 function collecter() {
   if (enCours) return enCours;
   return enCours = (async () => {
     try {
-      const [s, m] = await Promise.all([source.scanner(), poste.relever()]);
-      scan = s; mesure = m; pret = true; genere = Date.now(); erreur = null;
+      const maintenant = Date.now(), m = await poste.relever();
+      const pr = await processus.scanner(poste.procs || [], maintenant);
+      const [c, cx] = await Promise.all([source.scanner(maintenant), codex.scanner(maintenant, { codexVivant: pr.codexVivant })]);
+      index.oublier(new Set([...c.vus, ...cx.vus]));
+      scan = { sessions: [...c.sessions, ...cx.sessions, ...pr.sessions], agents: [...c.agents, ...cx.agents] };
+      placerTous(scan, maintenant);
+      locaux = pr.locaux; mesure = m; pret = true; genere = Date.now(); erreur = null;
       if (org.synchroniser(stock.o, scan.sessions)) await stock.enregistrer();
     } catch (e) { erreur = String(e && e.message || e); console.error(e); }
     finally { enCours = null; }
@@ -55,7 +77,7 @@ function etat(fenetre) {
     indexation: source.progression, organisation: o,
     sessions: scan.sessions.map(s => ({ ...s, ...res.sessions[s.cle], mesures: mesurer(s, res.sessions[s.cle], o) })),
     agents: scan.agents.map(a => ({ ...a, ...res.agents[a.cle], mesures: mesurer(a, res.agents[a.cle], o) })),
-    kpi: calculer(scan, res, o, fen), poste: mesure
+    kpi: calculer(scan, res, o, fen), poste: mesure, locaux
   };
 }
 

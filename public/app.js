@@ -27,9 +27,8 @@ const initiales = n => (String(n).match(/[\p{L}\p{N}]+/gu) || ['?']).slice(0, 2)
 // ---------- État ----------
 const TQ = new URLSearchParams(location.search).get('t');
 let D = null, S = new Map(), A = new Map(), P = new Map(), B = new Map();
-let vue = store.get('bureau.vue') || 'plan', fen = store.get('bureau.fen') || '24h', fermees = store.get('bureau.fermees') === '1', cherche = '', sel = store.get('bureau.sel');
+let vue = store.get('bureau.vue') || 'plan', fen = store.get('bureau.fen') || '24h', cherche = '', sel = store.get('bureau.sel');
 let tri = { agents: { c: 'cout', asc: false }, sessions: { c: 'cout', asc: false } };
-$('fermees').checked = fermees;
 
 const nomDe = cle => (S.get(cle) || A.get(cle) || {}).nom || 'absent';
 function rolesDe(cle) {
@@ -41,8 +40,16 @@ function rolesDe(cle) {
 }
 const enFenetre = x => ETATS[x.etat].vif || x.derniereActivite >= Date.now() - FEN_MS[fen];
 const correspond = x => !cherche || x.nom.toLowerCase().includes(cherche) || (x.nomOrigine || '').toLowerCase().includes(cherche);
-function sessionsVisibles() { return D.sessions.filter(s => (fermees || s.etat !== 'terminee') && enFenetre(s)); }
-function agentsVisibles(s) { return s.agents.map(k => A.get(k)).filter(a => a && enFenetre(a)); }
+const present = x => x.presence && x.presence !== 'parti';
+const sessionsVisibles = () => D.sessions.filter(s => present(s) || s.agents.some(k => A.get(k) && present(A.get(k))));
+const agentsVisibles = s => s.agents.map(k => A.get(k)).filter(a => a && present(a));
+const SOURCES = { 'claude-code': ['Claude Code', '#C96442'], codex: ['Codex', '#D85A30'], copilot: ['GitHub Copilot', '#378ADD'], cursor: ['Cursor', '#2C2C2A'], windsurf: ['Windsurf', '#1F8A99'], codeium: ['Codeium', '#1F8A99'], aider: ['Aider', '#4F8A2F'], gemini: ['Gemini CLI', '#2F6FB3'], goose: ['Goose', '#8A5A3A'], opencode: ['OpenCode', '#444441'], qwen: ['Qwen Code', '#A24C97'], amp: ['Amp', '#C0446A'], tabnine: ['Tabnine', '#6A61D0'] };
+const sourceDe = x => (SOURCES[x.source] || [x.source || 'Agent'])[0];
+function libelle(x) {
+  if (x.presence === 'parti') return ETATS[x.etat].t;
+  if (x.presence === 'poste') return x.raison === 'outil' ? 'outil en cours' + (x.stats && x.stats.dernierOutil ? ' : ' + x.stats.dernierOutil : '') : 'à son poste';
+  return x.raison === 'attend' ? 'en pause, attend ta réponse' : x.raison === 'repos' ? 'en pause, processeur au repos' : 'en pause';
+}
 // Pendant qu'on tape dans un champ, on ne redessine pas le bloc qui le contient
 const occupe = el => { const a = document.activeElement; return a && el.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName); };
 
@@ -53,7 +60,7 @@ function carte(x, lead) {
     + '<span class="av">' + esc(initiales(x.nom)) + '<i' + (x.etat === 'en_cours' || x.etat === 'active' ? ' class="pulse"' : '') + '></i></span>'
     + '<span class="nm">' + esc(x.nom) + '</span>'
     + (lead ? '<span class="roles">' + roles.map(r => '<span class="role ' + r[1] + '">' + esc(r[0]) + '</span>').join('') + '</span>' : '')
-    + '<span class="sub">' + e.t + (lead ? ' · ' + esc(p ? p.nom : x.depot) : x.etat === 'en_cours' || x.etat === 'en_attente' ? '' : ' · ' + ago(x.derniereActivite)) + '</span></button>';
+    + '<span class="sub">' + esc(sourceDe(x)) + ' · ' + esc(libelle(x)) + '</span></button>';
 }
 function renderPlan() {
   const parBureau = new Map(D.organisation.bureaux.map(b => [b.id, new Map()]));
@@ -64,18 +71,30 @@ function renderPlan() {
     if (okS || okA.some(a => a.bureau === s.bureau)) equipe(s.bureau, s).lead = true;
     for (const a of okS ? ag : okA) equipe(a.bureau, s).agents.push(a);
   }
-  const pleins = [], vides = [];
-  for (const b of D.organisation.bureaux) (parBureau.get(b.id).size ? pleins : vides).push(b);
+  const pleins = D.organisation.bureaux.filter(b => parBureau.get(b.id).size);
   const piece = b => {
     const eq = [...parBureau.get(b.id).values()], n = eq.reduce((x, e) => x + e.agents.length + (e.lead ? 1 : 0), 0);
     return '<section class="piece" data-b="' + esc(b.id) + '" style="--c:' + couleur(b.id) + '"><div class="piece-h"><h3>' + esc(b.nom) + '</h3><small>' + n + ' pers.</small></div><div class="piece-b">'
-      + (eq.length ? eq.map(e => '<div class="equipe">' + (e.lead ? carte(e.s, true) : '<p class="none" style="font-size:11.5px">Équipe de ' + esc(e.s.nom) + '</p>')
-        + (e.agents.length ? '<div class="postes">' + e.agents.map(a => carte(a, false)).join('') + '</div>' : '') + '</div>').join('') : '<div class="piece-vide">Bureau vide : glisse quelqu\'un ici.</div>')
-      + '</div></section>';
+      + eq.map(e => '<div class="equipe">' + (e.lead ? carte(e.s, true) : '<p class="none" style="font-size:11.5px">Équipe de ' + esc(e.s.nom) + '</p>')
+        + (e.agents.length ? '<div class="postes">' + e.agents.map(a => carte(a, false)).join('') + '</div>' : '') + '</div>').join('') + '</div></section>';
   };
-  $('plan').innerHTML = pleins.map(piece).join('') + vides.map(piece).join('')
-    + '<div class="ajout"><form id="f-bureau"><input type="text" name="nom" maxlength="60" placeholder="Nom du nouveau bureau" aria-label="Nom du nouveau bureau" required><button class="btn prim" type="submit">Créer</button></form></div>';
+  $('plan').innerHTML = pleins.map(piece).join('') + '<div class="ajout"><form id="f-bureau"><input type="text" name="nom" maxlength="60" placeholder="Nom du nouveau bureau" aria-label="Nom du nouveau bureau" required><button class="btn prim" type="submit">Créer</button></form></div>';
+  // Scène : mêmes occupants que la liste, plus les bureaux créés à la main même vides
+  const auto = new Set(D.organisation.projets.map(p => p.bureau));
+  const salles = D.organisation.bureaux.filter(b => parBureau.get(b.id).size || (!auto.has(b.id) && b.id !== 'accueil')).map(b => ({ id: b.id, nom: b.nom, couleur: couleur(b.id), occupants: [...parBureau.get(b.id).values()].flatMap(e => [...(e.lead ? [e.s.cle] : []), ...e.agents.map(a => a.cle)]) }));
+  const pers = [...D.sessions, ...D.agents].filter(present).map(x => ({ cle: x.cle, nom: x.nom, couleur: couleur(x.projet), presence: x.presence, raison: x.raison, lead: x.cle.startsWith('s:'),
+    outilCoul: (SOURCES[x.source] || [])[1] || '#888780', bulle: x.raison === 'attend' ? 'attend' : x.raison === 'outil' ? (x.stats && x.stats.dernierOutil ? x.stats.dernierOutil : 'outil') : '', detail: x.nom + ' · ' + sourceDe(x) + ' · ' + libelle(x) }));
+  Bureau.maj({ salles, personnes: pers, modeles: D.locaux.modeles, sel, filtre: cherche });
+  renderPartis();
 }
+function renderPartis() {
+  const el = $('partis'), ms = Date.now() - FEN_MS[fen], l = [...D.agents, ...D.sessions].filter(x => x.presence === 'parti' && x.derniereActivite >= ms).sort((a, b) => b.derniereActivite - a.derniereActivite);
+  const ouvert = el.querySelector('details') && el.querySelector('details').open, ni = l.filter(x => x.etat === 'interrompu').length;
+  el.innerHTML = l.length ? '<details class="partis"' + (ouvert ? ' open' : '') + '><summary>Ont quitté le bureau sur la période : ' + l.length + (ni ? ' · <span class="alerte">' + ni + ' interrompu' + (ni > 1 ? 's' : '') + '</span>' : '') + '</summary><ul class="alist">'
+    + l.slice(0, 100).map(x => '<li><button type="button" data-k="' + esc(x.cle) + '"><span class="dot" style="--e:' + ETATS[x.etat].css + '"></span>' + esc(x.nom) + ' · ' + esc(sourceDe(x)) + ' · ' + ETATS[x.etat].t + ' · ' + ago(x.derniereActivite) + '</button></li>').join('') + '</ul></details>' : '';
+}
+$('partis').addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (b) choisir(b.dataset.k, false); });
+Bureau.sur({ choisir: k => choisir(k, true), deposer: (k, b) => deplacer(k, b) });
 const plan = $('plan');
 plan.addEventListener('click', e => { const b = e.target.closest('.pers'); if (b) choisir(b.dataset.k, true); });
 plan.addEventListener('dragstart', e => { const b = e.target.closest('.pers'); if (!b) return; e.dataTransfer.setData('text/plain', b.dataset.k); e.dataTransfer.effectAllowed = 'move'; b.classList.add('glisse'); });
@@ -105,12 +124,22 @@ function blocNom(x) {
 }
 function renderFiche() {
   const f = $('fiche'); if (occupe(f)) return;
+  if (sel && sel.startsWith('m:')) return renderFicheModele(f);
   const x = sel && (A.get(sel) || S.get(sel));
   if (!x) { f.innerHTML = '<p class="kicker">Fiche</p><p class="none">' + (D ? 'Clique sur une personne pour voir ce qu\'elle fait, la renommer ou la changer de bureau.' : 'Chargement…') + '</p>'; return; }
   const e = ETATS[x.etat], c = couleur(x.projet), p = P.get(x.projet), st = x.stats || {};
+  if (x.niveau === 'presence') {
+    const pr = x.processus || {};
+    f.innerHTML = '<div class="who"><span class="badge" style="--c:' + c + '">' + esc(sourceDe(x)) + '</span><span class="etat" style="--e:' + (x.presence === 'poste' ? 'var(--run)' : 'var(--warn)') + '">' + esc(libelle(x)) + '</span></div><div><p class="kicker">Vu par ses processus</p><h2>' + esc(x.nom) + '</h2></div>' + blocNom(x)
+      + '<label class="ligne"><span class="kicker" style="margin:0;flex:0 0 auto">Bureau</span><select data-act="bureau">' + optBureaux(x.bureau) + '</select></label>'
+      + '<div class="mini"><div><b>' + nb(pr.cpu) + ' %</b><span>Processeur</span></div><div><b>' + (pr.memMo >= 1024 ? fr(pr.memMo / 1024) + ' Go' : nb(pr.memMo) + ' Mo') + '</b><span>Mémoire</span></div><div><b>' + nb(pr.nombre) + '</b><span>Processus</span></div></div>'
+      + '<p class="none">Cet outil ne laisse pas d\'historique lisible : ni tâche, ni jetons. Il passe « à son poste » quand ses processus utilisent le processeur. Il peut tourner sans agent actif, dès que son éditeur est ouvert.</p>'
+      + (x.cwd ? '<dl class="meta"><dt>Dossier</dt><dd>' + esc(x.cwd.replace(/^(\/Users|\/home|C:\\Users)[\\/][^\\/]+/i, '~')) + '</dd></dl>' : '');
+    return;
+  }
   if (x.cle.startsWith('a:')) {
     const s = S.get(x.session), build = D.poste && x.worktree && D.poste.builds.includes(x.worktree);
-    f.innerHTML = '<div class="who"><span class="badge" style="--c:' + c + '">' + esc(x.type) + '</span><span class="etat" style="--e:' + e.css + '">' + e.t + '</span>' + (x.arrierePlan ? '<span class="orig">arrière-plan</span>' : '') + '</div>'
+    f.innerHTML = '<div class="who"><span class="badge" style="--c:' + c + '">' + esc(sourceDe(x)) + ' · ' + esc(x.type) + '</span><span class="etat" style="--e:' + e.css + '">' + esc(libelle(x)) + '</span>' + (x.arrierePlan ? '<span class="orig">arrière-plan</span>' : '') + '</div>'
       + '<div><p class="kicker">' + (e.vif ? 'Travaille sur' : 'A travaillé sur') + '</p><h2>' + esc(x.nom) + '</h2></div>'
       + blocNom(x)
       + '<label class="ligne"><span class="kicker" style="margin:0;flex:0 0 auto">Bureau</span><select data-act="bureau">' + optBureaux(x.bureau) + '</select></label>'
@@ -123,7 +152,7 @@ function renderFiche() {
   } else {
     const o = D.organisation, ag = x.agents.map(k => A.get(k)).filter(Boolean), tot = ag.reduce((t, a) => { for (const k of ['jetons', 'cout', 'editions', 'commits']) t[k] += a.mesures[k]; return t; }, { jetons: 0, cout: 0, editions: 0, commits: 0 });
     const on = (v, t, act) => '<button type="button" class="btn petit' + (v ? ' prim' : '') + '" aria-pressed="' + v + '" data-act="' + act + '">' + t + '</button>';
-    f.innerHTML = '<div class="who"><span class="badge" style="--c:' + c + '">session</span><span class="etat" style="--e:' + e.css + '">' + e.t + '</span>' + rolesDe(x.cle).map(r => '<span class="role ' + r[1] + '">' + esc(r[0]) + '</span>').join('') + '</div>'
+    f.innerHTML = '<div class="who"><span class="badge" style="--c:' + c + '">' + esc(sourceDe(x)) + ' · session</span><span class="etat" style="--e:' + e.css + '">' + esc(libelle(x)) + '</span>' + rolesDe(x.cle).map(r => '<span class="role ' + r[1] + '">' + esc(r[0]) + '</span>').join('') + '</div>'
       + '<div><p class="kicker">Lead</p><h2>' + esc(x.nom) + '</h2></div>'
       + blocNom(x)
       + '<div><p class="kicker">Rôles</p><div class="ligne">' + on(o.roles.chefProjet === x.cle, 'Chef de projet global', 'chef') + on(o.roles.techLead === x.cle, 'Tech lead global', 'tl')
@@ -136,6 +165,13 @@ function renderFiche() {
       + (st.branche ? '<dt>Branche</dt><dd>' + esc(st.branche) + '</dd>' : '') + (st.modele ? '<dt>Modèle</dt><dd>' + esc(st.modele) + '</dd>' : '') + '<dt>Activité</dt><dd>' + ago(x.derniereActivite) + '</dd></dl>'
       + (ag.length ? '<div><p class="kicker">Son équipe</p><ul class="alist">' + ag.map(a => '<li><button type="button" data-k="' + esc(a.cle) + '"><span class="dot" style="--e:' + ETATS[a.etat].css + '"></span>' + esc(a.nom) + '</button></li>').join('') + '</ul></div>' : '<p class="none">Aucun agent lancé.</p>');
   }
+}
+function renderFicheModele(f) {
+  const [, moteur, ...r] = sel.split(':'), nom = r.join(':'), m = D.locaux.modeles.find(x => x.moteur === moteur && x.nom === nom);
+  if (!m) { f.innerHTML = '<p class="none">Ce modèle n\'est plus disponible.</p>'; return; }
+  f.innerHTML = '<div class="who"><span class="badge" style="--c:#444441">' + esc(m.moteur) + '</span><span class="etat" style="--e:' + (m.calcule ? 'var(--run)' : m.charge ? 'var(--warn)' : 'var(--done)') + '">' + (m.calcule ? 'calcule' : m.charge ? 'chargé, au repos' : 'non chargé') + '</span></div><div><p class="kicker">Modèle local</p><h2>' + esc(m.nom) + '</h2></div>'
+    + '<div class="mini">' + (m.tailleGo ? '<div><b>' + fr(m.tailleGo) + ' Go</b><span>Sur le disque</span></div>' : '') + (m.memoireGo ? '<div><b>' + fr(m.memoireGo) + ' Go</b><span>En mémoire</span></div>' : '') + (m.famille ? '<div><b>' + esc(m.famille) + '</b><span>Famille</span></div>' : '') + '</div>'
+    + '<p class="none">Le moteur n\'indique pas quel agent utilise ce modèle.</p>';
 }
 const fiche = $('fiche');
 fiche.addEventListener('click', e => {
@@ -156,9 +192,10 @@ fiche.addEventListener('change', e => {
 function choisir(k, depuisPlan) {
   sel = k; store.set('bureau.sel', k);
   if (vue !== 'plan') montrer('plan');
+  const x = A.get(k) || S.get(k); if (!depuisPlan && (k.startsWith('m:') || (x && present(x)))) Bureau.viserCle(k);
   document.querySelectorAll('.pers.on').forEach(c => c.classList.remove('on'));
   document.querySelectorAll('.pers[data-k="' + CSS.escape(k) + '"]').forEach(c => c.classList.add('on'));
-  $('fiche').innerHTML = ''; renderFiche();
+  $('fiche').innerHTML = ''; renderFiche(); if (D) renderPlan();
   if (matchMedia('(max-width:980px)').matches && depuisPlan) $('fiche').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -167,9 +204,9 @@ const COLS = [['cout', 'Coût est.', dollars], ['jetons', 'Jetons', nb], ['duree
 function tableLignes(lignes, cle) {
   const t = tri[cle], l = [...lignes].sort((a, b) => (t.c === 'nom' ? a.nom.localeCompare(b.nom) : (a[t.c] || 0) - (b[t.c] || 0)) * (t.asc ? 1 : -1)).slice(0, 200);
   const th = (c, txt) => '<th><button type="button" data-tri="' + cle + ':' + c + '"' + (t.c === c ? ' aria-sort="' + (t.asc ? 'ascending' : 'descending') + '"' : '') + '>' + txt + '</button></th>';
-  return '<div class="tbl"><table><thead><tr>' + th('nom', cle === 'agents' ? 'Agent' : 'Session') + '<th>État</th><th>Projet</th>' + COLS.map(([c, txt]) => th(c, txt)).join('') + '</tr></thead><tbody>'
-    + (l.length ? l.map(x => { const p = P.get(x.projet); return '<tr><td><button type="button" class="lien" data-k="' + esc(x.cle) + '">' + esc(x.nom) + '</button></td><td>' + ETATS[x.etat].t + '</td><td>' + (p ? '<span class="sw" style="--c:' + couleur(p.id) + '"></span>' + esc(p.nom) : '—') + '</td>'
-      + COLS.map(([c, , f]) => '<td>' + (c === 'tauxErreur' && !x.outils ? '—' : f(x[c])) + '</td>').join('') + '</tr>'; }).join('') : '<tr><td colspan="12" class="none">Rien sur cette période.</td></tr>') + '</tbody></table></div>';
+  return '<div class="tbl"><table><thead><tr>' + th('nom', cle === 'agents' ? 'Agent' : 'Session') + '<th>Outil</th><th>État</th><th>Projet</th>' + COLS.map(([c, txt]) => th(c, txt)).join('') + '</tr></thead><tbody>'
+    + (l.length ? l.map(x => { const p = P.get(x.projet); return '<tr><td><button type="button" class="lien" data-k="' + esc(x.cle) + '">' + esc(x.nom) + '</button></td><td>' + esc((SOURCES[x.source] || [x.source])[0]) + '</td><td>' + ETATS[x.etat].t + '</td><td>' + (p ? '<span class="sw" style="--c:' + couleur(p.id) + '"></span>' + esc(p.nom) : '—') + '</td>'
+      + COLS.map(([c, , f]) => '<td>' + (c === 'tauxErreur' && !x.outils ? '—' : f(x[c])) + '</td>').join('') + '</tr>'; }).join('') : '<tr><td colspan="13" class="none">Rien sur cette période.</td></tr>') + '</tbody></table></div>';
 }
 function tableGroupes(groupes, nommer) {
   const l = Object.entries(groupes).sort((a, b) => b[1].cout - a[1].cout);
@@ -213,6 +250,7 @@ function renderPoste() {
   const diskPct = d.disqueTotalGo ? 100 * d.disqueLibreGo / d.disqueTotalGo : null, nbB = d.builds.length, win = d.plateforme === 'win32';
   const K = [
     { k: 'Processeur', s: lvl(d.cpuPct, 75, 92), v: d.cpuPct == null ? 'mesure…' : fr(d.cpuPct, 0) + ' %', sub: d.ncpu + ' cœurs', pct: d.cpuPct, sp: spark(H.map(x => x.cpu), 100), dsc: 'Utilisation moyenne de tous les cœurs' },
+    { k: 'GPU', s: lvl(d.gpuPct, 75, 95), v: d.gpuPct == null ? 'non disponible' : fr(d.gpuPct, 0) + ' %', sub: d.gpuMemTotalGo ? fr(d.gpuMemUtiliseGo) + ' / ' + fr(d.gpuMemTotalGo) + ' Go' : '', pct: d.gpuPct, sp: spark(H.map(x => x.gpu), 100), dsc: d.gpuPct == null ? 'Aucun GPU lisible sur ce système' : 'Utilisation du processeur graphique, sert aux modèles locaux' },
     { k: 'Charge', s: lvl(ratio, 1, 2), v: ratio == null ? 'non disponible' : fr(ratio) + '×', sub: ratio == null ? '' : fr(d.load1) + ' / ' + d.ncpu, pct: ratio == null ? 0 : Math.min(100, ratio / 3 * 100), sp: ratio == null ? '' : spark(H.map(x => x.load != null ? x.load / d.ncpu : null), 3),
       dsc: ratio == null ? 'Windows ne fournit pas de charge moyenne' : 'Sur 5 min : ' + fr(d.load5) + ', sur 15 min : ' + fr(d.load15) },
     { k: win ? 'Fichier d\'échange' : 'Swap', s: lvl(swapPct, 50, 80), v: swapPct == null ? 'non disponible' : fr(swapPct, 0) + ' %', sub: swapPct == null ? '' : fr(d.swapUtiliseGo) + ' / ' + fr(d.swapTotalGo) + ' Go', pct: swapPct, sp: spark(H.map(x => x.swap), 100), dsc: 'Le disque sert de mémoire quand les ' + d.memGo + ' Go ne suffisent plus' },
@@ -240,7 +278,14 @@ function renderPoste() {
       + (x.sp || (x.s === 'na' ? '' : '<div class="bar"><i style="width:' + Math.round(Math.max(0, Math.min(100, x.pct || 0))) + '%"></i></div>')) + '<div class="d">' + esc(x.dsc) + '</div></div>').join('') + '</div></div>'
     + '<div class="cols"><div class="bloc"><h3>Ce qui consomme</h3><ul class="hogs">' + (d.top || []).map(h => '<li><span>' + esc(h.n) + '</span><em>' + h.cpu + ' % · ' + (h.mem >= 1024 ? fr(h.mem / 1024) + ' Go' : h.mem + ' Mo') + '</em>' + (h.count > 1 ? '<small>' + h.count + ' processus</small>' : '') + '</li>').join('') + '</ul></div>'
     + '<div class="bloc"><h3>Pour faire baisser le risque</h3><ol class="todo">' + todo.map(t => '<li>' + esc(t) + '</li>').join('') + '</ol></div></div>'
-    + '<p class="seuils">Seuils : processeur 75 % / 92 % · charge 1× / 2× les cœurs · swap 50 % / 80 % · mémoire libre 30 % / 15 % · disque libre 20 % / 10 % · builds 3 / 5. Courbes sur les dernières 24 h.</p></div>';
+    + renderLocaux()
+    + '<p class="seuils">Seuils : processeur 75 % / 92 % · GPU 75 % / 95 % · charge 1× / 2× les cœurs · swap 50 % / 80 % · mémoire libre 30 % / 15 % · disque libre 20 % / 10 % · builds 3 / 5. Courbes sur les dernières 24 h.</p></div>';
+}
+
+function renderLocaux() {
+  const l = D.locaux; if (!l.moteurs.length) return '<div class="bloc"><h3>Modèles locaux</h3><p class="none">Aucun moteur de modèles lancé (Ollama, LM Studio, llama.cpp, MLX, vLLM…).</p></div>';
+  return '<div class="bloc"><h3>Modèles locaux</h3><p class="none">' + l.moteurs.map(m => esc(m.nom) + ' sur le port ' + m.port + (m.repond ? '' : ' (ne répond pas)')).join(' · ') + '</p><div class="tbl"><table><thead><tr><th>Modèle</th><th>Moteur</th><th>État</th><th>Sur le disque</th><th>En mémoire</th></tr></thead><tbody>'
+    + l.modeles.map(m => '<tr><td>' + esc(m.nom) + '</td><td>' + esc(m.moteur) + '</td><td>' + (m.calcule ? 'calcule' : m.charge ? 'chargé' : 'non chargé') + '</td><td>' + (m.tailleGo ? fr(m.tailleGo) + ' Go' : '—') + '</td><td>' + (m.memoireGo ? fr(m.memoireGo) + ' Go' : '—') + '</td></tr>').join('') + '</tbody></table></div></div>';
 }
 
 // ---------- Organisation ----------
@@ -254,6 +299,7 @@ function renderOrganisation() {
   const o = D.organisation, occ = id => D.sessions.filter(s => s.bureau === id).length + D.agents.filter(a => a.bureau === id).length;
   const noms = Object.entries(o.noms);
   el.innerHTML = '<div class="vue-grid">'
+    + '<div class="carte"><h2>Salle de pause</h2><label class="ligne"><span>Un agent part en pause après</span><input type="number" min="1" max="60" step="1" style="flex:0 0 80px" value="' + o.reglages.seuilPauseMin + '" data-op="reglage"><span>minutes sans activité</span></label><p class="none">Un agent dont un outil tourne encore (un build, par exemple) reste à son poste.</p></div>'
     + '<div class="carte"><h2>Rôles globaux</h2><div class="rang" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))"><label>Chef de projet global<select data-op="role" data-role="chefProjet">' + optSessions(o.roles.chefProjet) + '</select></label>'
     + '<label>Tech lead global<select data-op="role" data-role="techLead">' + optSessions(o.roles.techLead) + '</select></label></div><p class="none">Un rôle est porté par une session Claude : c\'est elle qui pilote. Le badge s\'affiche sur le plan.</p></div>'
     + '<div class="carte"><h2>Projets</h2><p class="none">Un projet regroupe un ou plusieurs dépôts. Les nouveaux dépôts créent leur projet et leur bureau automatiquement.</p><div class="rangs">'
@@ -272,7 +318,8 @@ function renderOrganisation() {
 const vOrg = $('v-organisation');
 vOrg.addEventListener('change', e => {
   const t = e.target, op = t.dataset.op, p = t.closest('[data-p]'), b = t.closest('[data-b]'); if (!op) return;
-  if (op === 'role') envoyer({ op, role: t.dataset.role, cle: t.value || null });
+  if (op === 'reglage') envoyer({ op, seuilPauseMin: Number(t.value) });
+  else if (op === 'role') envoyer({ op, role: t.dataset.role, cle: t.value || null });
   else if (op === 'projet.renommer' && t.value.trim()) envoyer({ op, id: p.dataset.p, nom: t.value });
   else if (op === 'projet.techLead') envoyer({ op, id: p.dataset.p, cle: t.value || null });
   else if (op === 'projet.bureau') envoyer({ op, id: p.dataset.p, bureau: t.value || null });
@@ -294,7 +341,8 @@ function indexer() {
 }
 function renderEntete() {
   const ouvertes = D.sessions.filter(s => s.etat !== 'terminee'), n = e => D.agents.filter(a => a.etat === e).length, g = D.kpi.global;
-  $('counts').innerHTML = [[ouvertes.length, 'sessions ouvertes'], [D.sessions.filter(s => s.etat === 'active').length, 'au travail'], [n('en_cours'), 'agents en cours'], [n('en_attente'), 'en attente'], [g.termines, 'terminés sur la période'], [dollars(g.cout), 'estimés sur la période']]
+  const tous = [...D.sessions, ...D.agents], lm = D.locaux.modeles;
+  $('counts').innerHTML = [[tous.filter(x => x.presence === 'poste').length, 'à leur poste'], [tous.filter(x => x.presence === 'pause').length, 'en pause'], [ouvertes.length, 'sessions ouvertes'], [new Set(tous.filter(present).map(x => x.source)).size, 'outils'], [lm.filter(m => m.charge).length + ' / ' + lm.length, 'modèles locaux chargés'], [g.termines, 'terminés sur la période'], [dollars(g.cout), 'estimés']]
     .map(([v, t]) => '<span><b>' + v + '</b>' + t + '</span>').join('');
   if (D.poste) $('hote').textContent = 'Agents de codage · ' + D.poste.hote + ' · ' + D.poste.systeme;
   const bd = $('bandeau'), i = D.indexation;
@@ -304,8 +352,8 @@ function renderEntete() {
 }
 function rendre() {
   if (!D) return;
-  indexer(); if (sel && !A.has(sel) && !S.has(sel)) sel = null;
-  if (!sel) { const s = D.sessions.find(s => s.etat === 'active') || D.sessions[0]; if (s) sel = s.cle; }
+  indexer(); if (sel && !sel.startsWith('m:') && !A.has(sel) && !S.has(sel)) sel = null;
+  if (!sel) { const s = D.sessions.find(s => s.presence === 'poste') || D.sessions.find(present) || D.sessions[0]; if (s) sel = s.cle; }
   renderEntete();
   if (vue === 'plan') { renderPlan(); renderFiche(); }
   if (vue === 'rendement') renderRendement();
@@ -316,6 +364,7 @@ function montrer(v) {
   vue = v; store.set('bureau.vue', v);
   document.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.v === v));
   document.querySelectorAll('.vue').forEach(s => { s.hidden = s.id !== 'v-' + v; });
+  Bureau.actif(v === 'plan');
   rendre();
 }
 document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('button[data-v]'); if (b) montrer(b.dataset.v); });
@@ -346,7 +395,6 @@ async function envoyer(op) {
 }
 $('actualiser').onclick = () => charger(true);
 $('fenetre').addEventListener('click', e => { const b = e.target.closest('button[data-f]'); if (!b) return; fen = b.dataset.f; store.set('bureau.fen', fen); charger(false); });
-$('fermees').onchange = e => { fermees = e.target.checked; store.set('bureau.fermees', fermees ? '1' : '0'); rendre(); };
 $('cherche').addEventListener('input', e => { cherche = e.target.value.trim().toLowerCase(); if (vue === 'plan') renderPlan(); });
 setInterval(() => { if (!document.hidden) charger(false); }, 10000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) charger(false); });
