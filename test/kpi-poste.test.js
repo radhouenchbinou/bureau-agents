@@ -1,18 +1,30 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const { calculer, cout, prixDe, PRIX_DEFAUT } = require('../lib/kpi');
+const { calculer, cout, coutDetail, prixDe, PRIX_DEFAUT, GRILLE_DATE } = require('../lib/kpi');
 const { worktreeDe, psUnix, nomProcessus } = require('../lib/poste');
 const { projetDuDossier, projetDuDossierEncode } = require('../lib/source-claude');
 
 const st = (o = {}) => ({ debut: 0, fin: 60e3, actifMs: 30e3, outils: 10, erreurs: 1, editions: 4, fichiers: 2, commits: 1,
   tokens: { entree: 1e6, sortie: 1e6, cacheLu: 0, cacheEcrit: 0 }, modele: 'claude-sonnet-5-5', ...o });
 
-test('prix par famille de modèle, grille remplaçable', () => {
-  assert.equal(prixDe('claude-opus-5-5', PRIX_DEFAUT), PRIX_DEFAUT.opus);
+test('prix par version de modèle, famille en repli, grille remplaçable', () => {
+  assert.equal(prixDe('claude-opus-5-5', PRIX_DEFAUT), PRIX_DEFAUT['opus-5-5']);
+  assert.equal(prixDe('claude-opus-4-1-20250805', PRIX_DEFAUT), PRIX_DEFAUT['opus-4-1']);
+  assert.equal(prixDe('claude-opus-9', PRIX_DEFAUT), PRIX_DEFAUT.opus);
   assert.equal(prixDe('inconnu', PRIX_DEFAUT), PRIX_DEFAUT.defaut);
-  assert.equal(cout(st(), PRIX_DEFAUT), 3 + 15);
-  assert.equal(cout(st({ tokens: { entree: 0, sortie: 0, cacheLu: 1e6, cacheEcrit: 1e6 } }), PRIX_DEFAUT), 0.3 + 3.75);
-  assert.equal(cout(st(), { ...PRIX_DEFAUT, sonnet: { entree: 1, sortie: 2 } }), 3);
+  assert.equal(cout(st(), PRIX_DEFAUT), 2 + 10);                                    // Sonnet 5.5
+  assert.equal(cout(st({ tokens: { entree: 0, sortie: 0, cacheLu: 1e6, cacheEcrit: 1e6 } }), PRIX_DEFAUT), 0.1 + 2.5);
+  assert.equal(cout(st(), { ...PRIX_DEFAUT, 'sonnet-5-5': { entree: 1, sortie: 2 } }), 3);
+  assert.equal(GRILLE_DATE, '2026-11-09');
+});
+
+test('coût par modèle : chaque modèle à son prix, cache 1 h à 2 ×, modèle inconnu signalé', () => {
+  const parModele = { 'claude-opus-5-5': { entree: 1e6, sortie: 0, cacheLu: 1e6, ecrit5m: 1e6, ecrit1h: 1e6 },
+    'claude-haiku-5-5#>100k': { entree: 1e6, sortie: 1e6, cacheLu: 0, ecrit5m: 0, ecrit1h: 0 } };
+  const c = coutDetail(st({ parModele }), PRIX_DEFAUT);
+  assert.ok(Math.abs(c.cout - (4 + 0.2 + 5 + 8 + 0.5 + 2.5)) < 1e-9);
+  assert.equal(c.approx, false);
+  assert.equal(coutDetail(st({ parModele: { 'gpt-x': { entree: 1e6, sortie: 0, cacheLu: 0, ecrit5m: 0, ecrit1h: 0 } } }), PRIX_DEFAUT).approx, true);
 });
 
 test('agrégats par projet et bureau sur la fenêtre', () => {
@@ -30,7 +42,8 @@ test('agrégats par projet et bureau sur la fenêtre', () => {
   assert.equal(k.global.sessions, 1);
   assert.equal(k.global.commits, 1 + 3 + 1);
   assert.equal(k.global.terminesParHeure, 1);
-  assert.equal(k.projets.p.cout, 3 * 18);
+  assert.equal(k.projets.p.cout, 3 * 12);
+  assert.equal(k.tarifs, GRILLE_DATE);
   assert.equal(k.bureaux.b.editions, 8);
   assert.equal(k.global.tauxErreur, 3 / 30);
 });

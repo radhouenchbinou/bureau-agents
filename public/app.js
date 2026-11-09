@@ -25,7 +25,6 @@ function ago(ms) { if (!ms) return '—'; const s = Math.max(0, Math.round((Date
 const initiales = n => (String(n).match(/[\p{L}\p{N}]+/gu) || ['?']).slice(0, 2).map(w => w[0]).join('').toUpperCase();
 
 // ---------- État ----------
-const TQ = new URLSearchParams(location.search).get('t');
 let D = null, S = new Map(), A = new Map(), P = new Map(), B = new Map();
 let vue = store.get('bureau.vue') || 'plan', fen = store.get('bureau.fen') || '24h', cherche = '', sel = store.get('bureau.sel');
 let tri = { agents: { c: 'cout', asc: false }, sessions: { c: 'cout', asc: false } };
@@ -115,7 +114,7 @@ function options(liste, val, vide) { return (vide ? '<option value="">' + esc(vi
 const optBureaux = val => options(D.organisation.bureaux.map(b => [b.id, b.nom]), val);
 function mini(m) {
   const t = [['Durée', duree(m.dureeMs)], ['Temps actif', duree(m.actifMs)], ['Outils', nb(m.outils)], ['Erreurs', m.outils ? pct(m.tauxErreur) : '—'], ['Éditions', nb(m.editions)], ['Fichiers', nb(m.fichiers)],
-    ['Commits', nb(m.commits)], ['Jetons', nb(m.jetons)], ['Coût estimé', dollars(m.cout)]];
+    ['Commits', nb(m.commits)], ['Jetons', nb(m.jetons)], ['Coût estimé', dollars(m.cout) + (m.coutApprox ? ' ≈' : '')]];
   return '<div class="mini">' + t.map(([k, v]) => '<div><b>' + v + '</b><span>' + k + '</span></div>').join('') + '</div>';
 }
 function blocNom(x) {
@@ -218,11 +217,11 @@ function tableGroupes(groupes, nommer) {
 function renderRendement() {
   const k = D.kpi, g = k.global, lib = { '1h': 'la dernière heure', '24h': 'les dernières 24 h', '7j': 'les 7 derniers jours' }[fen];
   const tile = (t, v, d) => '<div class="tile"><span class="k">' + t + '</span><span class="v">' + v + '</span>' + (d ? '<span class="d">' + d + '</span>' : '') + '</div>';
-  $('v-rendement').innerHTML = '<div class="vue-grid"><div class="bloc"><div class="bloc-h"><h2>Rendement sur ' + lib + '</h2><p>Agents et leads actifs pendant la période ; leurs compteurs portent sur toute leur durée. Coût estimé au prix public des API.</p></div><div class="tiles">'
+  $('v-rendement').innerHTML = '<div class="vue-grid"><div class="bloc"><div class="bloc-h"><h2>Rendement sur ' + lib + '</h2><p>Agents et leads actifs pendant la période ; leurs compteurs portent sur toute leur durée. Coût estimé au prix public des API (tarifs au ' + esc(k.tarifs || '?') + ', chaque modèle à son prix).</p></div><div class="tiles">'
     + tile('Agents actifs', nb(g.agents), g.sessions + ' session' + (g.sessions > 1 ? 's' : '') + ' (leads)') + tile('Agents terminés', nb(g.termines), fr(g.terminesParHeure) + ' par heure')
     + tile('En cours', nb(g.enCours + g.enAttente), g.enAttente ? g.enAttente + ' en attente' : '') + tile('Durée moyenne', duree(g.dureeMoyenneMs), 'des agents terminés')
     + tile('Temps actif cumulé', duree(g.actifMs)) + tile('Erreurs d\'outils', g.outils ? pct(g.tauxErreur) : '—', nb(g.erreurs) + ' sur ' + nb(g.outils) + ' appels')
-    + tile('Éditions', nb(g.editions), nb(g.fichiers) + ' fichiers') + tile('Commits', nb(g.commits)) + tile('Jetons', nb(g.jetons)) + tile('Coût estimé', dollars(g.cout), dollars(g.coutMoyen) + ' en moyenne') + '</div></div>'
+    + tile('Éditions', nb(g.editions), nb(g.fichiers) + ' fichiers') + tile('Commits', nb(g.commits)) + tile('Jetons', nb(g.jetons)) + tile('Coût estimé', dollars(g.cout), dollars(g.coutMoyen) + ' en moyenne' + (g.coutApprox ? ' · ' + g.coutApprox + ' au tarif par défaut (modèle absent de la grille)' : '')) + '</div></div>'
     + '<div class="bloc"><h3>Par projet</h3>' + tableGroupes(k.projets, id => { const p = P.get(id); return [p ? p.nom : 'Sans projet', couleur(p && p.id)]; }) + '</div>'
     + '<div class="bloc"><h3>Par bureau</h3>' + tableGroupes(k.bureaux, id => { const b = B.get(id); return [b ? b.nom : id, couleur(id)]; }) + '</div>'
     + '<div class="bloc"><h3>Agents</h3>' + tableLignes(k.agents.map(l => ({ ...l, nom: nomDe(l.cle) })), 'agents') + '</div>'
@@ -370,7 +369,7 @@ function montrer(v) {
 document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('button[data-v]'); if (b) montrer(b.dataset.v); });
 
 // ---------- Réseau ----------
-const qs = extra => { const p = new URLSearchParams({ fenetre: fen, ...extra }); if (TQ) p.set('t', TQ); return '?' + p; };
+const qs = extra => '?' + new URLSearchParams({ fenetre: fen, ...extra });   // le jeton d'accès passe par le cookie de session
 let chargement = null;
 async function charger(maintenant) {
   const btn = $('actualiser'), msg = $('msg');
@@ -384,8 +383,8 @@ async function charger(maintenant) {
 }
 async function envoyer(op) {
   try {
-    const h = { 'Content-Type': 'application/json', 'X-Bureau-Csrf': D.csrf }; if (TQ) h['X-Bureau-Token'] = TQ;
-    const r = await fetch('/api/organisation' + (TQ ? '?t=' + encodeURIComponent(TQ) : ''), { method: 'POST', headers: h, body: JSON.stringify(op) });
+    const h = { 'Content-Type': 'application/json', 'X-Bureau-Csrf': D.csrf };
+    const r = await fetch('/api/organisation', { method: 'POST', headers: h, body: JSON.stringify(op) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { $('msg').textContent = 'Refusé : ' + (j.erreur || 'HTTP ' + r.status); return; }
     $('msg').textContent = 'Enregistré';

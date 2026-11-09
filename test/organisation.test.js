@@ -103,3 +103,21 @@ test('le stock enregistre de façon atomique et se recharge', async () => {
   assert.deepEqual(fs.readdirSync(path.dirname(f)), ['organisation.json']);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('projets créés automatiquement : retirés après 30 jours sans activité, sauf s\'ils ont été retouchés', () => {
+  const t0 = Date.parse('2026-10-01T00:00:00Z'), j = 864e5, o = org.nouvelle();
+  org.synchroniser(o, scan().sessions, t0);
+  assert.ok(o.projets.every(p => p.auto) && o.bureaux.find(b => b.id === 'api').auto);
+  org.appliquer(o, { op: 'projet.renommer', id: 'front', nom: 'Interface' });   // retouché : gardé pour toujours
+  assert.equal(org.synchroniser(o, [], t0 + 29 * j), false);
+  assert.equal(org.synchroniser(o, [], t0 + 31 * j), true);
+  assert.deepEqual(o.projets.map(p => p.id), ['front']);
+  assert.deepEqual(o.bureaux.map(b => b.id), ['accueil', 'front']);
+  // Encore vu : la date est rafraîchie et le projet reste
+  const o2 = org.nouvelle(); org.synchroniser(o2, scan().sessions, t0);
+  org.synchroniser(o2, scan().sessions, t0 + 20 * j);
+  org.synchroniser(o2, [], t0 + 45 * j);
+  assert.equal(o2.projets.length, 2);
+  // L'indicateur survit à l'enregistrement
+  assert.equal(org.normaliser(JSON.parse(JSON.stringify(o2))).projets[0].auto, true);
+});

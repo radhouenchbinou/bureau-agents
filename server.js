@@ -11,6 +11,7 @@ const { presence, Stabilisateur } = require('./lib/presence');
 const { Poste } = require('./lib/poste');
 const org = require('./lib/organisation');
 const { calculer, mesurer } = require('./lib/kpi');
+const acces = require('./lib/acces');
 
 const DATA = process.env.BUREAU_DATA || path.join(os.homedir(), '.bureau-agents');
 const F_INDEX = path.join(DATA, 'index-transcripts.json'), F_HIST = path.join(DATA, 'historique.json'), F_ORG = path.join(DATA, 'organisation.json');
@@ -22,6 +23,9 @@ const HORIZON_J = Number(process.env.BUREAU_HORIZON_JOURS || 7);
 const REFRESH_MS = 10e3, SAUVE_MS = 30e3;
 const FENETRES = { '1h': 36e5, '24h': 864e5, '7j': 7 * 864e5 };
 const CSRF = crypto.randomBytes(24).toString('hex');
+// Noms d'hôte supplémentaires acceptés (ex. bureau.local:4747), séparés par des virgules
+const HOTES = (process.env.BUREAU_HOSTS || '').split(',').map(h => h.trim()).filter(Boolean);
+const HTTPS = process.env.BUREAU_HTTPS === '1';   // derrière un proxy HTTPS : cookie Secure
 
 if (!['127.0.0.1', 'localhost', '::1'].includes(HOST) && !TOKEN) { console.error('BUREAU_HOST ouvre le serveur au réseau : définir aussi BUREAU_TOKEN.'); process.exit(1); }
 
@@ -82,7 +86,8 @@ function etat(fenetre) {
 }
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json' };
-const egal = (a, b) => typeof a === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+const egal = acces.egal;
+const CSP = "default-src 'self'; script-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'; frame-ancestors 'none'";
 
 function corps(req, max = 32 << 10) {
   return new Promise((ok, ko) => { let n = 0; const b = []; req.on('data', c => { n += c.length; if (n > max) { ko(new Error('trop gros')); req.destroy(); } else b.push(c); }); req.on('end', () => ok(Buffer.concat(b).toString('utf8'))); req.on('error', ko); });
@@ -90,12 +95,14 @@ function corps(req, max = 32 << 10) {
 
 http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
-  const envoyer = (code, body, type = 'application/json; charset=utf-8') => {
+  const envoyer = (code, body, type = 'application/json; charset=utf-8', extra = {}) => {
     res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
-      'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'" });
+      'X-Frame-Options': 'DENY', 'Content-Security-Policy': CSP, ...extra });
     res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
   };
-  if (TOKEN && !egal(u.searchParams.get('t') || req.headers['x-bureau-token'], TOKEN)) return envoyer(401, { erreur: 'Jeton manquant ou faux' });
+  const a = acces.controler(req, u, { host: HOST, port: PORT, token: TOKEN, hotes: HOTES, https: HTTPS });
+  if (a.refus) return envoyer(a.refus[0], { erreur: a.refus[1] });
+  if (a.redirection) return envoyer(302, '', 'text/plain; charset=utf-8', { Location: a.redirection, 'Set-Cookie': a.cookie });
   try {
     if (u.pathname === '/api/etat' && req.method === 'GET') {
       if (u.searchParams.has('maintenant') || !pret) await collecter();
@@ -111,12 +118,12 @@ http.createServer(async (req, res) => {
       catch (e) { if (e instanceof org.ErreurOrganisation) return envoyer(400, { erreur: e.message }); throw e; }
     }
     if (req.method !== 'GET') return envoyer(405, { erreur: 'Méthode refusée' });
-    const rel = u.pathname === '/' ? 'index.html' : decodeURIComponent(u.pathname).replace(/^\/+/, '');
+    let rel; try { rel = u.pathname === '/' ? 'index.html' : decodeURIComponent(u.pathname).replace(/^\/+/, ''); } catch { return envoyer(400, 'Chemin illisible', 'text/plain; charset=utf-8'); }
     const f = path.resolve(PUBLIC, rel);
-    if (!f.startsWith(PUBLIC + path.sep)) return envoyer(404, 'Introuvable', 'text/plain; charset=utf-8');
+    if (rel.includes('\0') || !f.startsWith(PUBLIC + path.sep)) return envoyer(404, 'Introuvable', 'text/plain; charset=utf-8');
     fsp.readFile(f).then(b => envoyer(200, b, TYPES[path.extname(f)] || 'application/octet-stream'), () => envoyer(404, 'Introuvable', 'text/plain; charset=utf-8'));
   } catch (e) { console.error(e); envoyer(500, { erreur: 'Erreur interne' }); }
-}).listen(PORT, HOST, () => console.log(`Bureau des agents : http://${HOST === '0.0.0.0' ? os.hostname() : HOST}:${PORT}/${TOKEN ? '?t=…' : ''}`));
+}).listen(PORT, HOST, () => console.log(`Bureau des agents : http://${HOST === '0.0.0.0' ? os.hostname() : HOST}:${PORT}/${TOKEN ? '?t=<BUREAU_TOKEN> (une fois : un cookie prend le relais)' : ''}`));
 
 (async () => { await stock.charger(); await collecter(); await sauver(); })();
 setInterval(collecter, REFRESH_MS);
